@@ -2,6 +2,8 @@
 
 **Streaming Issue Solver: Crash Override.** An .asi plugin for Grand Theft Auto IV.
 
+Download it from [Nexus Mods](https://www.nexusmods.com/gta4/mods/1453). This repository is its source.
+
 GTA IV is notorious for its texture streaming problems. Those of us who have been modding the game for years have all seen what happens as soon as we want to install just a few bigger mods.
 
 SISCO raises the limits to better accommodate bigger mod installs, and fixes the things that break when you do.
