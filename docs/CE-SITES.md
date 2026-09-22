@@ -2,10 +2,12 @@
 
 CE is 1.2.0.59 (timestamp 0x63D3E735, SizeOfImage 0x1BE6400, ASLR on). Its first megabyte of code (0x401000 to
 0x4FB000) ships encrypted and is decrypted in memory at startup, so those addresses can only be read from a runtime
-dump: `CEDump.asi` wrote one on 2026-09-22 (base 0x00F80000, 100% of the 20,663 relocation sites in the range pointing
-into the image, 10,952,704 bytes of .text), and `tools/ce_merge.py` put it back into a copy of the executable,
-`CEDUMP\ce-merged.exe`, which matches the file on disk byte for byte outside that range. Every address below was read
-from that copy. The dump and the copy stay on the owner's machine: they are the game's code.
+dump. One was taken with the game running: 10,952,704 bytes of .text, with every one of the 20,663 relocation sites
+in that range pointing back into the image, which is what says the bytes are code and not ciphertext. Undoing the
+loader's relocation and merging it back into a copy of the executable gives a file that matches the one on disk byte
+for byte everywhere outside the encrypted range, and that self-check is what says the merge is aligned and the build
+is the same one. Every address below was read from that copy. The dump itself is the game's own code and is not
+published.
 
 **What the dump also proved:** at the moment a plugin loads on CE, the streamer, the resource cache, the VehicleStruct
 pool, the population object, the param list, the video-memory figure and the pool mode are all still zero, and the
@@ -13,7 +15,7 @@ budget table already holds its stock values (row 0 = 210 MB, row 15 High = 800 M
 plugin is early enough on CE to set everything, exactly as on 1.0.8.0. CE's stock car and ped budgets are the same
 40,000,000 and 50,000,000 bytes.
 
-## Read by the lead (2026-09-22)
+## The first group
 
 | site | 1.0.8.0 | CE | bytes | note |
 |---|---|---|---|---|
@@ -25,7 +27,7 @@ plugin is early enough on CE to set everything, exactly as on 1.0.8.0. CE's stoc
 | VStructSize | 0xA4A2B0 | **0xA7B10C** | `6A 32 8B C8` | `push 0x32` then `mov ecx, eax`, then the pool constructor 0xC6C5F0, then the pool pointer to 0x12FA84C |
 | VehicleStruct pool | 0x1401BCC | **0x12FA84C** | data | confirmed by the store after the constructor |
 | NativeInit | 0x626A80 | **0x86FC70** | `64 A1 2C 00 00 00` | the same prologue, so the same 5-byte jump fits |
-| NativeSizeSt | 0x626A9D | **0x86FC94** | `89 1D 20 AF B4 01` | the size stored BEFORE the allocation: crash 1 is on CE too |
+| NativeSizeSt | 0x626A9D | **0x86FC94** | `89 1D 20 AF B4 01` | the size stored BEFORE the allocation, so the startup crash is on CE too |
 | NativePtrSt | 0x626AB3 | **0x86FCA8** | `A3 1C AF B4 01` | the pointer stored after the allocation at 0x86FCA3 |
 | NativeCountSt | 0x626AD4 | **0x86FCC6** | `C7 05 28 AF B4 01 00 00 00 00` | the count; the capacity-not-positive path writes it at 0x86FCD6 instead |
 | native table pointer | 0x190FDD0 | **0x1B4AF1C** | data | |
@@ -36,15 +38,16 @@ plugin is early enough on CE to set everything, exactly as on 1.0.8.0. CE's stoc
 CE's takes it as a stack argument (`[esp+4]` at entry) and returns with `ret 4`, and leaves the table pointer in eax.
 The replacement needs its own thunk on CE: read the argument, call the same replacement, then `ret 4`.
 
-## Read by the site fan-out (2026-09-22)
+## The rest
 
-Six agents read one group each from `ce-merged.exe` and the 1.0.8.0 executable side by side, reaching every site from an
-anchor that survives a recompile (a unique immediate, an import, a call graph from an address already known) and then
-matching the CE function against 1.0.8.0's instruction by instruction. 91 of the 95 things they reported carry the bytes
-they read; every one of those was re-checked against `ce-merged.exe` afterwards and all of them hold. The three that
-carry no bytes are a struct offset, the PE header and a site that does not exist on CE. Everything below is now in
-`core/sis_core.h` as the `CE_` table, and `tools/sl_sites_check.py` re-checks all of it against `ce-merged.exe` on every
-build (62 checks, part of `build.ps1`).
+The remaining sites were read the same way: each one reached from an anchor that survives a recompile (a unique
+immediate, an import, a call graph from an address already known), then the Complete Edition's function matched
+against 1.0.8.0's instruction by instruction. 91 of the 95 findings carry the bytes they were read from, and every one
+of those was re-checked against the recovered executable afterwards; all of them held. The four that carry no bytes
+are a struct offset, the PE header, and a site that does not exist on this build at all.
+
+All of it is in `core/sis_core.h` as the `CE_` table, and `tools/sisco_sites_check.py` re-checks every one of those
+addresses and expected bytes against the recovered executable on every build, as part of `build.ps1`.
 
 | what | 1.0.8.0 | CE |
 |---|---|---|
@@ -84,7 +87,7 @@ left it (`core/sis_core_tests.h`, the "Complete Edition's shapes" block: 20 chec
    there; the stub keeps eax.
 6. **The native-table init takes its capacity as a stack argument, returns the table's pointer and ends `ret 4`**
    (1.0.8.0: esi, returns the capacity, `ret`). Its own thunk, `ThunkNativeInitCe`. The size is still stored before the
-   allocation, so crash 1 is on CE too.
+   allocation, so the startup crash is on CE too.
 7. **CPlayerInfo -> the player's ped is +0x598**, not +0x58C. ped +0x20 (the matrix) and matrix +0x30 (the position) are
    unchanged. This is the only struct offset that moved.
 
@@ -97,19 +100,32 @@ a low-memory machine keeps the game's own.
 ## What does not carry over
 
 - **FusionFix's VehicleBudget and PedBudget patterns do not match on CE** (the budget is loaded with `imul` from memory,
-  not `mov ecx`), so nothing else will have written those two globals: SIS carries the addresses itself and whatever it
+  not `mov ecx`), so nothing else will have written those two globals: SISCO carries the addresses itself and whatever it
   writes stands.
 - **FusionFix's link-pool pattern does match** (0xAF48F0 byte for byte), so if it runs it still raises 13,000 to 20,000
-  before SIS loads, exactly as on 1.0.8.0. SIS accepts whatever value it finds and raises it further.
+  before SISCO loads, exactly as on 1.0.8.0. SISCO accepts whatever value it finds and raises it further.
 - **The "RESC10" string is not a build check on CE**: it lives elsewhere and sits in a block of shader names. The build
-  is named by its PE header and two reloc-free code anchors instead.
+  is named by its PE header and by two 20-byte runs of code instead, one in a vector-maths leaf and one in some float
+  setup, 340 KB apart. Both are inside the encrypted range, so reading them correctly also proves the code has been
+  decrypted by the time the mod looks. Neither is at a function's entry, which matters: the first version of this check
+  used the entry of the credit function, and that is exactly where FusionFix writes its detour when its
+  ExtraStreamingMemory option is on, so with that setting the mod would have refused to load and blamed the encryption.
 - The credit function's bytes are not 1.0.8.0's (`movss` where 1.0.8.0 has `fld`), but the first six are the same, so
   the check for "has FusionFix hooked it" behaves identically.
 - Direct3DCreate9 has **two callers on both builds** (the second is an adapter helper that makes a temporary
   IDirect3D9). The hook is on the import slot, so it sees both, and it acts on the first call only, as it always did.
 
+## Confirmed in the game
+
+Everything above has since been run on the Complete Edition, in base GTA IV and in an episode. The mod recognised the
+build, and every one of the twenty sites matched its expected bytes and went in: the three fixes, both pools, the
+VehicleStruct pool, the arena, the Direct3D hook and the launch options. The budget sized correctly against the card,
+and the car and ped budgets were raised.
+
 ## Still open
 
-- Nothing here was verified with the game running. The next step is a run on CE, in IV and in an episode.
-- Whether CE's drawable-slot pool actually fills at 10,000 the way 1.0.8.0's does was not measured; the code is the
-  same, so the freeze's precondition is the same.
+- Whether the drawable-slot pool actually fills at its stock 10,000 on this build the way it does on 1.0.8.0 has not
+  been measured. The code that allocates and steals from it is the same, so the conditions for the freeze are the
+  same, and the fix for it is in either way.
+- Native Direct3D 9 has not been run on either build. Without DXVK the mod applies its fixes and raises the pools but
+  leaves the budget alone, and that path has never been in front of the game.
