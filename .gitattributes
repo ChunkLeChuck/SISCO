@@ -1,0 +1,3 @@
+# sis_core.h is C++ (references, bool, overloads), not C. Without this GitHub counts the whole project as C, because
+# it goes by extension and the header is where nearly all of the code lives.
+*.h linguist-language=C++
