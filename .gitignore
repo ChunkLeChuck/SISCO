@@ -1,0 +1,7 @@
+obj/
+dist/
+games.txt
+*.asi
+*.exe
+*.obj
+*.log
