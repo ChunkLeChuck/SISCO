@@ -38,6 +38,21 @@ budgets are left exactly as the game set them. GTA IV's own renderer cannot reac
 there is nothing to raise the budget into. That path has not been measured: everything here was worked out and run
 under DXVK.
 
+## How it was tested
+
+I tested it by making a texture pack out of the game's own textures, every one of them doubled in size, so the game was
+under the same load a big HD pack puts it under. Then drove the same route from the same save, over and over. The drives
+stayed within a few metres of each other, so every run could be fairly compared to the last.
+
+The full pack was 3,989 texture files holding 54,363 textures, about 7 GB, and I could run it at 12.5% (1 GB), 25%
+(2.1 GB), 50% (3.7 GB) or 100% (7.2 GB) to turn the pressure up step by step. Each smaller size is part of the bigger
+one, so the steps are comparable.
+
+While driving I counted how often the game failed to show something, per kilometre, and how many different cars and
+people were on the street.
+
+79 runs in total. Most of them 6 to 15 minutes, and the longest 25 minutes to see if the fixes hold up.
+
 ## The three fixes
 
 These are bugs in the game, not in the mod. They are out of reach at the stock limits and easy to hit above them.
