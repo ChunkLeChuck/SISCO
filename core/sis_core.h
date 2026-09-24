@@ -33,7 +33,7 @@
 #ifndef SISCO_BUILD
 #define SISCO_BUILD "dev"
 #endif
-#define SIS_VERSION "1.0.0"
+#define SIS_VERSION "1.0.1"
 
 // ---------------------------------------------------------------------------------------------
 // Addresses (1.0.8.0 VA, image base 0x400000), rebased at run time. SITE lines are checked against GTAIV.exe on disk
@@ -86,6 +86,8 @@
 // video-memory figure is atoi(-availablevidmem) MiB.
 // SITE bytes  UnmanagedRead 0x406A3F  39 35 E0 98 0A 01
 // SITE bytes  ManagedRead   0x406A52  39 35 F8 98 0A 01
+// SITE bytes  PoolModeStore 0x406A4C  89 35 E0 AC 8C 01
+// SITE bytes  MemRestrictTest 0x40F152  83 3D 78 AB 0A 01 00 0F 85 58 01 00 00
 // SITE bytes  VidmemRead    0x402A65  A1 30 97 0A 01
 // The budget credit, grcResourceCache::GetAvailableFreeMemory: FusionFix's ExtraStreamingMemory hooks its entry and
 // raises the 0.9 multiplier up to 1.5 (memory.ixx), which the sizing must then assume.
@@ -124,6 +126,7 @@
 #define A_D3D_IAT       0xD6B5ECu
 #define A_RD_UNMANAGED  0x406A3Fu
 #define A_RD_MANAGED    0x406A52u
+#define A_POOL_STORE    0x406A4Cu   // mov [0x18CACE0], esi: proves the pool-mode address on this build
 #define A_RD_VIDMEM     0x402A65u
 #define A_GAFM          0x40EA20u   // grcResourceCache::GetAvailableFreeMemory
 #define D_CACHE         0x1A72030u  // grcResourceCache object
@@ -138,6 +141,15 @@
 #define D_NATIVE_COUNT  0x190FDDCu
 #define D_VSTRUCT_POOL  0x1401BCCu  // CPool* VehicleStruct (0 until the pool is built)
 #define A_VSTRUCT_STR   0xDAEE34u   // "VehicleStruct"
+#define D_SET_VIEW      0x10FC304u  // the graphics sliders the player runs at, logged so a report carries them
+#define D_SET_DETAIL    0x10FC308u
+#define D_SET_CARS      0x10FC30Cu
+#define D_FRAME         0x10FCC30u  // the game's frame counter: read for the build's frame rate on the load line
+#define A_FRAME_INC     0x7CC1DCu   // add dword ptr [D_FRAME], 1: the counter is read only while this is what advances it
+#define D_POOL_MODE     0x18CACE0u  // 0 unmanaged, 1 D3D-runtime managed: the block at 0x406A3F, last write wins
+#define A_MEMRESTRICT_TEST 0x40F152u  // cmp [nomemrestrict], 0 / jne row15: FusionFix forces this branch (ExtraStreamingMemory off)
+#define D_PARAM_NOMEMRESTRICT 0x10AAB78u   // the -nomemrestrict slot the test reads
+#define D_PARAM_MEMRESTRICT 0x10AAB90u     // the -memrestrict N slot: with it set the game never reads the table, so the budget is held
 #define D_PARAM_UNMANAGED 0x10A98E0u  // value slots of the game's own launch options (record + 8): non-NULL = given
 #define D_PARAM_MANAGED 0x10A98F8u
 #define D_PARAM_VIDMEM  0x10A9730u
@@ -155,6 +167,7 @@
 // in pc\audio\config\waveslots.xml, so that is the real ceiling, and a raised car budget is what makes it reachable.
 // SITE bytes  AudioSlotCap  0x8254D2  83 F8 19
 // SITE bytes  AudioHeap     0x7BC4EC  BE 00 00 E0 07
+// SITE bytes  FrameInc      0x7CC1DC  83 05 30 CC 0F 01 01
 #define A_AUDIO_SLOT_CAP 0x8254D2u  // cmp eax, 0x19: the loop's own limit, the imm8 at +2
 #define A_AUDIO_HEAP    0x7BC4ECu   // mov esi, 0x7E00000: the audio heap the slots are carved from, the imm32 at +1
 #define D_AUDIO_SLOTS   0x117B200u  // how many the loop resolved
@@ -182,6 +195,8 @@
 // CESITE bytes  NativeCountSt 0x86FCC6  C7 05 28 AF B4 01 00 00 00 00
 // CESITE bytes  UnmanagedRead 0x424686  39 0D A0 DD 10 01
 // CESITE bytes  ManagedRead   0x424699  39 0D BC DC 10 01
+// CESITE bytes  PoolModeStore 0x4246AB  A3 44 D9 7E 01
+// CESITE bytes  MemRestrictTest 0x427E5A  83 3D 48 DE 10 01 00 0F 85 62 01 00 00
 // CESITE bytes  VidmemRead    0x420583  A1 D4 DB 10 01
 // CESITE call   DrainFlushA   0x422DD8  -> 0x42A1F0
 // CESITE call   DrainFlushB   0x426ECA  -> 0x42A1F0
@@ -238,6 +253,7 @@
 #define CE_A_D3D_IAT       0xE73554u
 #define CE_A_RD_UNMANAGED  0x424686u   // cmp [slot], ecx (1.0.8.0: esi)
 #define CE_A_RD_MANAGED    0x424699u
+#define CE_A_POOL_STORE    0x4246ABu   // mov [0x17ED944], eax: proves the pool-mode address on this build
 #define CE_A_RD_VIDMEM     0x420583u
 #define CE_A_GAFM          0x4276B0u   // FusionFix's ExtraStreamingMemory detours this entry: never read it for identity
 #define CE_A_ANCHOR_A      0x466C40u   // build anchor: inside a vector-maths leaf, 48+ bytes past its entry
@@ -253,6 +269,13 @@
 #define CE_D_NATIVE_SIZE   0x1B4AF20u
 #define CE_D_NATIVE_COUNT  0x1B4AF28u
 #define CE_D_VSTRUCT_POOL  0x12FA84Cu
+#define CE_D_SET_VIEW      0x1160E94u
+#define CE_D_SET_DETAIL    0x1160E98u
+#define CE_D_SET_CARS      0x1160E9Cu
+#define CE_D_POOL_MODE     0x17ED944u  // the same, from the block at 0x424686 (CE uses cmovne where 1.0.8.0 branches)
+#define CE_A_MEMRESTRICT_TEST 0x427E5Au  // the same test, the same shape
+#define CE_D_PARAM_NOMEMRESTRICT 0x110DE48u
+#define CE_D_PARAM_MEMRESTRICT 0x110DE18u
 #define CE_D_PARAM_UNMANAGED 0x110DDA0u
 #define CE_D_PARAM_MANAGED 0x110DCBCu
 #define CE_D_PARAM_VIDMEM  0x110DBD4u
@@ -338,6 +361,7 @@ static const char* const kSiteName[S_COUNT] = { "QueuePush", "QueuePushIn1", "Qu
     "LinkFree3", "NativeInit", "VehicleStruct", "ArenaSize", "SlotSize", "LinkSize", "D3DCreate9" };
 struct Site { int state; char note[112]; };
 static Site g_site[S_COUNT];
+static uint32_t g_raised[S_COUNT];   // what each size raise left at its site, read back at sizing
 static void SiteSet(int s, int state, const char* fmt, ...) {
     g_site[s].state = state;
     va_list ap; va_start(ap, fmt); _vsnprintf_s(g_site[s].note, sizeof(g_site[s].note), _TRUNCATE, fmt, ap); va_end(ap);
@@ -698,8 +722,12 @@ struct CoreSites {                                                    // rebased
     uintptr_t d3dIat, d3dThunk, d3dCall, rdUnmanaged, rdManaged, rdVidmem, prmUnmanaged, prmManaged, prmVidmem;
     uint8_t paramCmpForm;                                             // the two flag readers: cmp against esi or ecx
     uintptr_t table, quality, rt0, cacheV, streamerN, loading, vehBudget, pedBudget, gafm, playerInfo;   // read and written in play
+    uintptr_t poolMode;            // what the game DECIDED about managed resources, not what SISCO asked for
+    uintptr_t memRestrictTest, prmNoMemRestrict, prmMemRestrict;   // which budget row the game runs on, asked its way
+    uintptr_t setView, setDetail, setCars;   // the player's View Distance, Detail Distance and Car Density: logged, never written
     uint32_t playerPedOff;                                            // CPlayerInfo -> the player's ped: 0x58C, 0x598 on the CE
     uintptr_t audioSlotCap, audioHeap, audioSlots;                    // the engine-sound slots: read, never written
+    uintptr_t frameCounter, frameInc;                                 // the game's frame counter and the add that advances it, for the load line; 0 = not on this build
     uint8_t audioCapModRm;                                            // the loop counts in eax (0xF8) or, on the CE, edi (0xFF)
 };
 static CoreSites g_cs;
@@ -730,9 +758,9 @@ static bool RaiseImm32(int s, uintptr_t at, uint8_t op, uint32_t want, uint32_t 
     __try { o = *(uint8_t*)at; v = *(uint32_t*)(at + 1); } __except (EXCEPTION_EXECUTE_HANDLER) { SiteSet(s, ST_OFF_ERROR, "unreadable"); return false; }
     if (built) { SiteSet(s, ST_OFF_ERROR, "too late: the game already built it"); return false; }
     if (o != op || v < lo || v > hi) { SiteSet(s, ST_OFF_MISMATCH, "not the size instruction (%02X %u)", o, v); return false; }
-    if (v >= want) { SiteSet(s, ST_ON, "kept %u (already at least %u)", v, want); return true; }
+    if (v >= want) { g_raised[s] = v; SiteSet(s, ST_ON, "kept %u (already at least %u)", v, want); return true; }
     if (!WriteCode(at + 1, &want, 4)) { SiteSet(s, ST_OFF_ERROR, "VirtualProtect failed"); return false; }
-    SiteSet(s, ST_ON, "%u -> %u", v, want); return true;
+    g_raised[s] = want; SiteSet(s, ST_ON, "%u -> %u", v, want); return true;
 }
 static bool RaisePools(const CoreSites& c, uint32_t slots, uint32_t links) {
     uint32_t head = 1, nodes = 1, first = 1;
@@ -757,9 +785,43 @@ static bool RaiseVehicleStruct(const CoreSites& c, uint8_t want) {
         SiteSet(S_VSTRUCT, ST_OFF_MISMATCH, "site bytes differ at %08X", (unsigned)c.vstructSize); return false;
     }
     if (pool != 0) { SiteSet(S_VSTRUCT, ST_OFF_ERROR, "too late: the pool exists"); return false; }
-    if (b[1] >= want) { SiteSet(S_VSTRUCT, ST_ON, "kept %u", b[1]); return true; }
+    if (b[1] >= want) { g_raised[S_VSTRUCT] = b[1]; SiteSet(S_VSTRUCT, ST_ON, "kept %u", b[1]); return true; }
     if (!WriteCode(c.vstructSize + 1, &want, 1)) { SiteSet(S_VSTRUCT, ST_OFF_ERROR, "VirtualProtect failed"); return false; }
-    SiteSet(S_VSTRUCT, ST_ON, "%u -> %u", b[1], want); return true;
+    g_raised[S_VSTRUCT] = want; SiteSet(S_VSTRUCT, ST_ON, "%u -> %u", b[1], want); return true;
+}
+// The four raises are writes SISCO trusted took, and three things undo them with nothing to see at the write: a
+// plugin that loads after SISCO and writes the same site (FusionFix sets the link pool to 20,000 and IVTweaker's
+// MaxGameHeap the arena, each without looking), a plugin that hooks the VehicleStruct constructor call and passes
+// its own count (IVTweaker's MaxVehicleStruct), and a load order that puts either after SISCO. So at sizing, with
+// every plugin loaded and every pool built, each site is read back: the size instruction the game read, and for
+// VehicleStruct the count the pool was built with (CPool +8 on both builds) and the constructor call itself. A site
+// that no longer holds at least what SISCO left is marked, and the budget then stays the game's own exactly as if
+// the raise had been refused at load. A larger value is another plugin's and stands.
+static const uint8_t kVsCtorCall1080[5] = { 0xE8, 0xF7, 0x9A, 0xDA, 0xFF };   // call 0x7F3DB0 at 0xA4A2B4
+static const uint8_t kVsCtorCallCe[5]   = { 0xE8, 0xDB, 0x14, 0x1F, 0x00 };   // call 0xC6C5F0 at 0xA7B110
+static char g_builtNote[200] = "";
+static void ReadBackRaises(const CoreSites& c) {
+    const int s3[3] = { S_SLOT_SIZE, S_LINK_SIZE, S_ARENA_SIZE };
+    const uintptr_t at3[3] = { c.slotSize, c.linkSize, c.arenaSize };
+    uint32_t v3[3] = { 0, 0, 0 };
+    for (int i = 0; i < 3; i++) {
+        if (g_site[s3[i]].state != ST_ON) continue;
+        if (!RdU32(at3[i] + 1, &v3[i])) SiteSet(s3[i], ST_OFF_ERROR, "unreadable at sizing");
+        else if (v3[i] < g_raised[s3[i]])
+            SiteSet(s3[i], ST_OFF_MISMATCH, "read back %u at sizing, not the %u SISCO left: another plugin set it after SISCO", v3[i], g_raised[s3[i]]);
+        if (g_site[s3[i]].state != ST_ON) SisLog("site", "%s %s (%s)", kSiteName[s3[i]], StName(g_site[s3[i]].state), g_site[s3[i]].note);
+    }
+    uint32_t pool = 0, built = 0;
+    if (g_site[S_VSTRUCT].state == ST_ON) {
+        if (!RdU32(c.vstructPool, &pool) || !pool || !RdU32(pool + 8, &built)) SiteSet(S_VSTRUCT, ST_OFF_ERROR, "the pool cannot be read at sizing");
+        else if (built < g_raised[S_VSTRUCT])
+            SiteSet(S_VSTRUCT, ST_OFF_MISMATCH, "built with %u, not the %u SISCO left: %s", built, g_raised[S_VSTRUCT],
+                    BytesEq(c.vstructSize + 4, c.build == BUILD_CE ? kVsCtorCallCe : kVsCtorCall1080, 5)
+                        ? "another plugin set the size after SISCO" : "the constructor call is hooked (IVTweaker's MaxVehicleStruct)");
+        if (g_site[S_VSTRUCT].state != ST_ON) SisLog("site", "%s %s (%s)", kSiteName[S_VSTRUCT], StName(g_site[S_VSTRUCT].state), g_site[S_VSTRUCT].note);
+    }
+    _snprintf_s(g_builtNote, sizeof(g_builtNote), _TRUNCATE, "drawable slots %u, links %u, arena %u KB, VehicleStruct pool %u (read back at sizing; 0 where a raise was not on)",
+                v3[0], v3[1], v3[2], built);
 }
 // The race fix goes in only when the whole function is the one read: its entry and its three stores.
 static bool InstallRaceFix(const CoreSites& c) {
@@ -830,15 +892,201 @@ static const GUID kIID_D3D9VkInteropInterface = { 0x3461a81b, 0xce41, 0x485b, { 
 typedef void* (WINAPI* D3DCreate9_t)(UINT);
 static D3DCreate9_t g_oD3DCreate9;
 static volatile LONG g_d3dCalls;
+// The switches from SISCO.ini, all on unless the file says otherwise. There are no values here on purpose:
+// nothing to set means nothing to set wrongly, and each switch only ever moves the game back towards vanilla.
+struct SisSettings { bool enabled, fixes, limits, budget; };
+static SisSettings g_set = { true, true, true, true };
+
+// SISCO.ini, beside the plugin and its log. Every key defaults to ON, so a missing file, a missing key, a typo
+// or an unreadable value all leave the mod behaving exactly as it does with no file at all. Enabled=0 turns the
+// other three off with it, so there is no way to ask for "off" and still get some of it.
+// Only a plain 0 turns something off. GetPrivateProfileInt would read any value it cannot parse as zero, so
+// "off", "no", "false" or a typo would each silently disable a group, which is the one surprise a file like this
+// must not have. Read as text, and anything that is not exactly 0 leaves that part on.
+static bool IniSwitch(const char* iniPath, const char* key) {
+    char v[16] = "";
+    GetPrivateProfileStringA("SISCO", key, "1", v, sizeof(v), iniPath);
+    const char* p = v;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '0') return true;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    return *p != 0 && *p != ';' && *p != '#';         // a comment after the 0 is still a 0
+}
+static SisSettings ReadSettings(const char* iniPath) {
+    SisSettings s;
+    s.enabled = IniSwitch(iniPath, "Enabled");
+    s.fixes = IniSwitch(iniPath, "Fixes");
+    s.limits = IniSwitch(iniPath, "Limits");
+    s.budget = IniSwitch(iniPath, "Budget");
+    if (!s.enabled) s.fixes = s.limits = s.budget = false;
+    return s;
+}
+
 static int g_dxvk = -1;                  // -1 not known yet, 0 native Direct3D 9, 1 DXVK
 static int64_t g_bootBudgetMb = -1;      // the card's budget when the game created Direct3D
 static char g_vidmemArg[16];
+static int g_playerVidmemMb;             // the player's own -availablevidmem, 0 if they set none
+
 // The figure given to the game: the card's budget, at most 8192 MiB. Above that nothing changes (T + X is at most
 // 4,799 MB at 4K), and 8192 is the figure every measured run above the stock budget used: the tested range.
 #define VIDMEM_MAX_MB 8192
+// The option slot holds a pointer to the argument text, which is how SISCO writes its own. Read it back as a
+// number, and refuse anything that is not plainly one: a figure that bounds the whole sizing is not worth
+// guessing at. The range is the one the game is given anyway, 64 MB up to the 8192 SISCO would write.
+static int ReadVidmemArg(uint32_t p) {
+    if (!p) return 0;
+    char s[16] = "";
+    __try {
+        const char* src = (const char*)(uintptr_t)p;
+        for (int i = 0; i < (int)sizeof(s) - 1; i++) { s[i] = src[i]; if (!src[i]) break; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    int n = 0, digits = 0;
+    for (int i = 0; s[i] && s[i] != ' '; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        n = n * 10 + (s[i] - '0');
+        if (++digits > 5) return 0;
+    }
+    return (digits && n >= 64 && n <= VIDMEM_MAX_MB) ? n : 0;
+}
 static const char g_flagArg[1] = "";     // a flag's value: the game only tests the slot for non-NULL
-static char g_d3dNote[200] = "Direct3DCreate9 not called yet";
+static char g_d3dNote[560] = "Direct3DCreate9 not called yet";
 static bool VulkanLoaded() { return GetModuleHandleA("vulkan-1.dll") != NULL; }
+// DXVK's version, for the log only. It once gated -managed, on the belief that the one slow world build measured on
+// a heavy install (23 s on 2.6.2) was 2.x's doing; the clean install then built the world in 61 s on 3.1.1 and 44 s
+// on 2.6.2 under a 30 fps cap with -managed, and in 2 s under the same cap without it (runs L4, L5, L6). The cap is
+// the ingredient, not the version. The version is the module's own marker, a standalone "v<major>.<minor>[.<patch>]"
+// between two NULs (v3.1.1 and v2.6.2 in those files on disk, none in FusionFix's d3d9.dll proxy or the system
+// d3d9.dll), looked for in the module that built the Direct3D object first, then in vulkan.dll and d3d9.dll by
+// name, because a wrapper (ReShade, ENB) owns that object on some installs.
+static int g_dxvkVer[3] = { -1, -1, -1 };          // -1: not found
+static char g_dxvkVerFrom[48] = "";                // the module the version was read from, for the log
+// A frame-rate cap. -managed is what makes a raised budget safe under DXVK (without it the address space collapses
+// at a budget of 1400, run D), and under a cap a load with -managed is a slow one: the world build after the player
+// appears is paced by presents that block, about 300 frames of them (5 fps and 61 s at a 30 fps cap, 9 fps and 30 s
+// at 60, runs L4 and L7). SISCO can see DXVK's own cap and a VSync forced in DXVK's config (read by SIS.cpp before
+// the game starts, with the parser below) and whether RTSS is loaded; it cannot see the driver's cap or RTSS's
+// figure. Any visible cap, or a forced interval, means -managed is not written and the budget stays the game's own,
+// whoever asked for -managed: the immediate present below bypasses neither. Everything else is logged, with the
+// frame rate of the build where the game's counter is known, so a report carries it.
+static int g_frameCap;                             // a visible DXVK cap in fps, 0 = none seen; set by SIS.cpp before Direct3DCreate9
+static int g_forcedInterval = -1;                  // d3d9.presentInterval from DXVK's config; -1 = not set, 1 or more = VSync forced
+static bool g_managedOn;                           // -managed is in effect after Direct3DCreate9: SISCO's or the player's
+static char g_frameCapFrom[48] = "";               // where the cap was seen
+static char g_capNote[400] = "";                   // why -managed was not set, for the size line; empty when it was
+#ifdef SISCO_TEST
+static int g_tRtss = -1;                           // the harness's answer for RTSS; -1 = ask the process
+#endif
+static bool RtssLoaded() {
+#ifdef SISCO_TEST
+    if (g_tRtss >= 0) return g_tRtss != 0;
+#endif
+    return GetModuleHandleA("RTSSHooks.dll") != NULL;
+}
+// DXVK's config, parsed the way DXVK 3.1 parses it (config.cpp, parseUserConfigLine): a line is "key = value", the
+// key [A-Za-z0-9._]+ and the value up to the first whitespace with any quotes dropped; a "[name]" line switches the
+// lines after it on only while name is the exe's file name, exactly; a later line wins, and a later value that is
+// not DXVK's integer (an optional '-', then digits) unsets the key, because DXVK's own read then falls back to its
+// default; anything else is ignored, which is how a '#' comment is. The DXVK_CONFIG variable holds the same lines
+// split on ';', applied over the file. The keys 3.1's D3D9 reads: dxvk.maxFrameRate over d3d9.maxFrameRate (1 or
+// more is a cap; 0 and below are not one SISCO can name), and d3d9.presentInterval (0 or more is forced over the
+// game's interval, and over the immediate present SISCO asks for while the world builds). dxgi.maxFrameRate and the
+// DXVK_FRAME_RATE variable belong to older DXVKs and are not read by 3.1's D3D9, so not here.
+#define CONF_UNSET (-1000000)
+struct DxvkConf { int d3d9Cap, dxvkCap, interval; const char* d3d9CapFrom; const char* dxvkCapFrom; const char* intervalFrom; };
+static bool ConfInt(const char* p, const char* e, int* out) {
+    int sign = 1; long long v = 0;
+    if (p < e && *p == '-') { sign = -1; p++; }
+    if (p >= e) return false;
+    for (; p < e; p++) { if (*p < '0' || *p > '9') return false; v = v * 10 + (*p - '0'); if (v > 100000000) return false; }
+    *out = (int)(sign * v);
+    return true;
+}
+static void DxvkConfParse(const char* text, size_t n, char sep, const char* exeName, const char* from, DxvkConf* c) {
+    bool active = true;
+    const char* end = text + n;
+    for (const char* line = text; line < end; ) {
+        const char* le = line; while (le < end && *le != sep && *le != '\n' && *le != '\r') le++;
+        const char* p = line; while (p < le && (*p == ' ' || *p == '\t')) p++;
+        if (p < le && *p == '[') {
+            const char* name = p + 1;
+            const char* q = le; while (q > name && *(q - 1) != ']') q--;         // the name runs to the last ']'
+            size_t nameN = q > name ? (size_t)(q - 1 - name) : 0;
+            active = nameN == strlen(exeName) && memcmp(name, exeName, nameN) == 0;
+        } else {
+            const char* k = p;
+            while (p < le && ((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '.' || *p == '_')) p++;
+            size_t kn = (size_t)(p - k);
+            while (p < le && (*p == ' ' || *p == '\t')) p++;
+            if (kn && p < le && *p == '=') {
+                p++; while (p < le && (*p == ' ' || *p == '\t')) p++;
+                char v[32]; size_t vn = 0;
+                for (; p < le && *p != ' ' && *p != '\t'; p++) if (*p != '"' && vn < sizeof(v) - 1) v[vn++] = *p;
+                int i = CONF_UNSET; bool ok = ConfInt(v, v + vn, &i);
+                if (active) {
+                    if (kn == 17 && memcmp(k, "d3d9.maxFrameRate", 17) == 0) { c->d3d9Cap = ok ? i : CONF_UNSET; c->d3d9CapFrom = from; }
+                    else if (kn == 17 && memcmp(k, "dxvk.maxFrameRate", 17) == 0) { c->dxvkCap = ok ? i : CONF_UNSET; c->dxvkCapFrom = from; }
+                    else if (kn == 20 && memcmp(k, "d3d9.presentInterval", 20) == 0) { c->interval = ok ? i : CONF_UNSET; c->intervalFrom = from; }
+                }
+            }
+        }
+        line = le; while (line < end && (*line == sep || *line == '\n' || *line == '\r')) line++;
+    }
+}
+#ifdef SISCO_TEST
+static const uint8_t* g_tDxvkImage; static size_t g_tDxvkImageN;   // the harness plants an image in place of the module
+#endif
+static bool DxvkVersionIn(const uint8_t* p, size_t n, int v[3]) {
+    for (size_t i = 0; i + 4 < n; i++) {
+        if (p[i] != 'v' || (i && p[i - 1] != 0) || p[i + 1] < '0' || p[i + 1] > '9') continue;
+        int parts[3] = { 0, 0, 0 }, k = 0, digits = 0; size_t j = i + 1;
+        for (; j < n && k < 3; j++) {
+            if (p[j] >= '0' && p[j] <= '9') { if (++digits > 3) break; parts[k] = parts[k] * 10 + (p[j] - '0'); }
+            else if (p[j] == '.' && digits) { k++; digits = 0; }
+            else break;
+        }
+        // The numbers end at a NUL, or at the '-' or '+' that git describe appends on a build not made from a clean tag.
+        if (j < n && (p[j] == 0 || p[j] == '-' || p[j] == '+') && digits && k >= 1 && k <= 2) { v[0] = parts[0]; v[1] = parts[1]; v[2] = k == 2 ? parts[2] : 0; return true; }
+    }
+    return false;
+}
+static bool DxvkScan(const uint8_t* p, size_t n) { __try { return DxvkVersionIn(p, n, g_dxvkVer); } __except (EXCEPTION_EXECUTE_HANDLER) { return false; } }
+// One module's readable, non-discardable sections, from its own headers, so nothing outside the image is touched.
+static bool DxvkVersionInModule(HMODULE m) {
+    if (!m) return false;
+    __try {
+        const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)m;
+        const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)((const uint8_t*)m + dos->e_lfanew);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE || nt->Signature != IMAGE_NT_SIGNATURE) return false;
+        const IMAGE_SECTION_HEADER* sh = IMAGE_FIRST_SECTION(nt);
+        // The marker is a string: the data sections first (.rdata holds it, 0.7 MB), the code (6.2 MB) only if none has it.
+        for (int pass = 0; pass < 2; pass++)
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+            if (!(sh[i].Characteristics & IMAGE_SCN_MEM_READ) || (sh[i].Characteristics & IMAGE_SCN_MEM_DISCARDABLE)) continue;
+            if (((sh[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) != (pass == 1)) continue;
+            if (DxvkScan((const uint8_t*)m + sh[i].VirtualAddress, sh[i].Misc.VirtualSize)) {
+                char path[MAX_PATH] = "?"; GetModuleFileNameA(m, path, MAX_PATH);
+                const char* base = strrchr(path, '\\');
+                _snprintf_s(g_dxvkVerFrom, sizeof(g_dxvkVerFrom), _TRUNCATE, "%s", base ? base + 1 : path);
+                return true;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { g_dxvkVer[0] = -1; }
+    return false;
+}
+static void DxvkVersionOf(void* d3d) {
+    g_dxvkVer[0] = g_dxvkVer[1] = g_dxvkVer[2] = -1; g_dxvkVerFrom[0] = 0;
+#ifdef SISCO_TEST
+    if (g_tDxvkImage) { if (DxvkScan(g_tDxvkImage, g_tDxvkImageN)) strcpy_s(g_dxvkVerFrom, "the planted image"); return; }
+#endif
+    uint32_t vt = 0, qi = 0;                        // the object's QueryInterface is code in the module that built it
+    HMODULE owner = NULL;
+    if (RdU32((uintptr_t)d3d, &vt) && RdU32(vt, &qi) && qi)
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)(uintptr_t)qi, &owner);
+    HMODULE byName[2] = { GetModuleHandleA("vulkan.dll"), GetModuleHandleA("d3d9.dll") };
+    if (DxvkVersionInModule(owner)) return;
+    for (int i = 0; i < 2; i++) if (byName[i] && byName[i] != owner && DxvkVersionInModule(byName[i])) return;
+}
 static void SisOnFirstD3D(void* d3d) {
     const char* how = "no Direct3D object";
     if (d3d) {
@@ -848,21 +1096,51 @@ static void SisOnFirstD3D(void* d3d) {
         if (SUCCEEDED(hr) && ip) { g_dxvk = 1; how = "DXVK (it answered its interop interface)"; ((IUnknown*)ip)->Release(); }
         else if (VulkanLoaded()) { g_dxvk = 1; how = "DXVK assumed: no interop interface, but vulkan-1.dll is loaded"; }
         else { g_dxvk = 0; how = "native Direct3D 9"; }
+        if (g_dxvk == 1) DxvkVersionOf(d3d);
+    }
+    char ver[320] = "";
+    if (g_dxvk == 1) {
+        if (g_dxvkVer[0] >= 0) _snprintf_s(ver, sizeof(ver), _TRUNCATE, "; DXVK %d.%d.%d (read from %s)%s", g_dxvkVer[0], g_dxvkVer[1], g_dxvkVer[2], g_dxvkVerFrom,
+                                           g_dxvkVer[0] < 3 ? "; SISCO is tested on 3.x, the vulkan.dll in the download" : "");
+        else strcpy_s(ver, "; DXVK version not found in any module");
+        if (g_frameCap > 0) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; frame cap %d fps (%s)", g_frameCap, g_frameCapFrom);
+        if (g_forcedInterval >= 1) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; VSync forced in DXVK's config (d3d9.presentInterval %d)", g_forcedInterval);
+        if (RtssLoaded()) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; RTSS is loaded (its cap cannot be read: a frame limit makes loads slow with -managed)");
     }
     if (g_dxgiState == 0) DxgiInit();
     int64_t b = -1;
     if (DxgiPoll(&b)) g_bootBudgetMb = b >> 20;
-    char opts[120] = "";
-    if (g_dxvk == 1) {
+    char opts[260] = "";
+    if (g_dxvk == 1 && !g_set.budget) strcpy_s(opts, "; no launch option set (Budget=0 in SISCO.ini)");
+    else if (g_dxvk == 1) {
         uint32_t un = 0, ma = 0, vm = 0;
         RdU32(g_cs.prmUnmanaged, &un); RdU32(g_cs.prmManaged, &ma); RdU32(g_cs.prmVidmem, &vm);
-        const char* m = un ? "the player's -unmanaged kept" : ma ? "the player's -managed kept" :
-                        WrU32(g_cs.prmManaged, (uint32_t)(uintptr_t)g_flagArg) ? "-managed set" : "-managed NOT set (write failed)";
-        char v[80];
+        // A visible frame cap, or a VSync forced in DXVK's config: -managed is not written, and the note holds the
+        // budget at sizing even when the player's own -managed is kept, because the slow load was measured with
+        // -managed however it got there. Neither is bypassed by the immediate present below.
+        bool capped = g_frameCap > 0 || g_forcedInterval >= 1;
+        if (g_frameCap > 0) _snprintf_s(g_capNote, sizeof(g_capNote), _TRUNCATE, "a frame-rate cap of %d fps (%s): under -managed a capped load is a slow one (measured: "
+                                "a 30 fps cap turned a 2 s world build into 61 s, a 60 cap into 30 s), so SISCO leaves -managed unset and the budget at the "
+                                "game's own; lift the cap while loading for the raised budget", g_frameCap, g_frameCapFrom);
+        else if (capped) _snprintf_s(g_capNote, sizeof(g_capNote), _TRUNCATE, "VSync forced in DXVK's config (d3d9.presentInterval %d): it overrides the immediate "
+                                "present SISCO uses while the world builds, and under -managed a load behind VSync is a slow one (measured: 27 s for a 2 s "
+                                "world build at 120 Hz), so SISCO leaves -managed unset and the budget at the game's own; remove that line for the raised "
+                                "budget (the game's own VSync setting is fine)", g_forcedInterval);
+        else g_capNote[0] = 0;
+        const char* m;
+        if (un) m = "the player's -unmanaged kept";
+        else if (ma) m = capped ? "the player's -managed kept; under the visible cap the budget still stays the game's own" : "the player's -managed kept";
+        else if (capped) m = "-managed NOT set under a visible cap, so the budget stays the game's own (the size line says how to get it)";
+        else m = WrU32(g_cs.prmManaged, (uint32_t)(uintptr_t)g_flagArg) ? "-managed set" : "-managed NOT set (write failed)";
+        uint32_t m2 = 0; RdU32(g_cs.prmManaged, &m2); g_managedOn = m2 != 0 && !un;
+        // Whatever the player set is the figure the game will believe, on whichever build, so it bounds the
+        // sizing later however much memory the card really has.
+        g_playerVidmemMb = ReadVidmemArg(vm);
+        char v[160];
         // 1.0.8.0 only. The Complete Edition already works out a figure of its own, measured at
         // 16,210 MB under DXVK, so writing ours could only ever lower it, and on a small card it would.
-        if (g_cs.build == BUILD_CE) strcpy_s(v, "-availablevidmem left to the Complete Edition, its own figure is larger");
-        else if (vm) strcpy_s(v, "the player's -availablevidmem kept");
+        if (vm) strcpy_s(v, "the player's -availablevidmem kept");
+        else if (g_cs.build == BUILD_CE) strcpy_s(v, "-availablevidmem left to the Complete Edition, which works out a figure of its own (FusionFix computes one from the card and the RAM)");
         else if (g_bootBudgetMb < 512) strcpy_s(v, "-availablevidmem NOT set (no budget from DXGI)");
         else {
             _snprintf_s(g_vidmemArg, sizeof(g_vidmemArg), _TRUNCATE, "%lld", g_bootBudgetMb > VIDMEM_MAX_MB ? (long long)VIDMEM_MAX_MB : g_bootBudgetMb);
@@ -871,12 +1149,77 @@ static void SisOnFirstD3D(void* d3d) {
         }
         _snprintf_s(opts, sizeof(opts), _TRUNCATE, "; %s; %s", m, v);
     }
-    _snprintf_s(g_d3dNote, sizeof(g_d3dNote), _TRUNCATE, "%s; card budget %lld MB%s", how, g_bootBudgetMb, opts);
+    _snprintf_s(g_d3dNote, sizeof(g_d3dNote), _TRUNCATE, "%s%s; card budget %lld MB%s", how, ver, g_bootBudgetMb, opts);
     SisLog("direct3d", "%s", g_d3dNote);
+}
+// ---------------------------------------------------------------------------------------------
+// Immediate presents while the world builds. Under -managed the world build after the player appears is paced by
+// presents that block: with VSync (120 Hz, no limiter, run L10) or a frame cap (L4 at 30, L7 at 60) the game crawls
+// at 5 to 10 fps for about 300 frames, 27 to 61 s, where an unblocked present builds the same world in 2 s and no
+// -managed builds it in 2 s under the 30 fps cap (L6). The phase before the player appears is not paced that way
+// (31 to 32 s with and without VSync, L10 against L13). So from the tick the worker sees the player appear after a
+// load, every present carries D3DPRESENT_FORCEIMMEDIATE, which DXVK 3.1 honours per call (d3d9_swapchain.cpp:135)
+// unless d3d9.presentInterval is forced in its config (:140; SIS.cpp reads that and the cap rule holds the budget
+// for it), and VSync is handed back once the world has built and 15 s have passed (LoadTick below). The menu and
+// the loading screens run as the game presents them. DXVK's own limiter and external ones (RTSS, the driver's) are
+// not bypassed by the flag; those keep the frame-cap rule. The hook is the shape DLSS-IV has run on this game under
+// DXVK since September: IDirect3D9::CreateDevice (slot 16) on the object Direct3DCreate9 returns, then the swap
+// chain's Present (slot 3) from GetSwapChain(0), each written once with the original read first; an overlay that
+// hooks above later is left alone, since the slot is never rewritten. The two slots are DXVK's, not the game's, so
+// they are chained, not compared against expected bytes. Only with -managed in effect and the budget on; the flag
+// is raised by the worker alone, so without a worker it is never raised.
+// ---------------------------------------------------------------------------------------------
+#define SIS_FORCEIMMEDIATE 0x00000100u             // D3DPRESENT_FORCEIMMEDIATE
+typedef HRESULT (__stdcall* CreateDevice_t)(void* d3d, UINT adapter, UINT type, HWND wnd, DWORD flags, void* pp, void** out);
+typedef HRESULT (__stdcall* GetSwapChain_t)(void* dev, UINT i, void** out);
+typedef HRESULT (__stdcall* SwapPresent_t)(void* sc, const RECT* src, const RECT* dst, HWND wnd, const RGNDATA* dirty, DWORD flags);
+static CreateDevice_t g_oCreateDevice;
+static SwapPresent_t g_oSwapPresent;
+static void** g_d3dVtblHooked; static void** g_swapVtblHooked;
+static volatile LONG g_presentImmediate;           // 1 while the world builds after a load: presents go out without waiting for VSync
+static volatile LONG g_immediatePresents;          // how many went out that way this load, for the log
+static bool WriteSlot(void** vt, int slot, void* fn) {
+    DWORD old = 0;
+    if (!VirtualProtect(vt + slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
+    vt[slot] = fn;
+    DWORD o2; VirtualProtect(vt + slot, sizeof(void*), old, &o2);
+    return true;
+}
+static HRESULT __stdcall HkSwapPresent(void* sc, const RECT* src, const RECT* dst, HWND wnd, const RGNDATA* dirty, DWORD flags) {
+    if (g_presentImmediate) { flags |= SIS_FORCEIMMEDIATE; InterlockedIncrement(&g_immediatePresents); }
+    return g_oSwapPresent(sc, src, dst, wnd, dirty, flags);
+}
+static HRESULT __stdcall HkCreateDevice(void* d3d, UINT adapter, UINT type, HWND wnd, DWORD flags, void* pp, void** out) {
+    HRESULT hr = g_oCreateDevice(d3d, adapter, type, wnd, flags, pp, out);
+    if (FAILED(hr) || !out || !*out || g_swapVtblHooked) return hr;
+    void* dev = *out; void** dvt = NULL; void* sc = NULL; uint32_t probe = 0;
+    if (!RdU32((uintptr_t)dev, (uint32_t*)&dvt) || !dvt || !RdU32((uintptr_t)(dvt + 14), &probe)) return hr;
+    GetSwapChain_t gsc = (GetSwapChain_t)dvt[14];
+    if (FAILED(gsc(dev, 0, &sc)) || !sc) return hr;
+    void** svt = NULL;
+    if (RdU32((uintptr_t)sc, (uint32_t*)&svt) && svt && RdU32((uintptr_t)(svt + 3), &probe) && svt[3] != (void*)HkSwapPresent) {
+        g_oSwapPresent = (SwapPresent_t)svt[3];
+        if (WriteSlot(svt, 3, (void*)HkSwapPresent)) {
+            g_swapVtblHooked = svt;
+            SisLog("present", "the swap chain Present is hooked: presents go out without waiting for VSync while the world builds after each load");
+        } else { g_oSwapPresent = NULL; SisLog("present", "the swap chain Present could NOT be hooked: VSync is not bypassed while the world builds"); }
+    }
+    ((IUnknown*)sc)->Release();
+    return hr;
+}
+static void HookCreateDevice(void* d3d) {
+    if (!d3d || g_d3dVtblHooked) return;
+    void** dvt = NULL; uint32_t probe = 0;
+    if (!RdU32((uintptr_t)d3d, (uint32_t*)&dvt) || !dvt || !RdU32((uintptr_t)(dvt + 16), &probe) || dvt[16] == (void*)HkCreateDevice) return;
+    g_oCreateDevice = (CreateDevice_t)dvt[16];
+    if (WriteSlot(dvt, 16, (void*)HkCreateDevice)) g_d3dVtblHooked = dvt; else g_oCreateDevice = NULL;
 }
 static void* WINAPI HkDirect3DCreate9(UINT sdk) {
     void* d3d = g_oD3DCreate9(sdk);
-    if (InterlockedIncrement(&g_d3dCalls) == 1) SisOnFirstD3D(d3d);
+    if (InterlockedIncrement(&g_d3dCalls) == 1) {
+        SisOnFirstD3D(d3d);
+        if (g_dxvk == 1 && g_set.budget && g_managedOn) HookCreateDevice(d3d);
+    }
     return d3d;
 }
 // The import slot is swapped only when the call path is the one read: the call, the thunk through this slot, and a
@@ -913,33 +1256,48 @@ static bool InstallD3DHook(const CoreSites& c) {
     SiteSet(S_D3D_IAT, ST_ON, "%s %s", direct ? "d3d9.dll's Direct3DCreate9" : "chained after a hook in", base ? base + 1 : mod);
     return true;
 }
-// The arena is built before Direct3D exists, so DXVK is predicted from FusionFix's d3d9.cfg ([MAIN] API = 1: its
-// d3d9.dll loads DXVK; settings.ixx reads it with default 0). A wrong guess costs only arena room, and the log shows
-// the guess beside what Direct3DCreate9 found.
-static int PredictDxvk(const char* gameDir) {
-    char p[MAX_PATH]; _snprintf_s(p, MAX_PATH, _TRUNCATE, "%s\\d3d9.cfg", gameDir);
-    if (GetFileAttributesA(p) == INVALID_FILE_ATTRIBUTES) return 0;
-    return GetPrivateProfileIntA("MAIN", "API", 0, p) == 1 ? 1 : 0;
-}
-
 // ---------------------------------------------------------------------------------------------
 // The budget. At its limit the game holds 0.9 x (T + X) of video memory, measured, and the card uses O more for
 // everything else, so T is the largest budget whose total fits in 85% of the card's
-// budget B, never over 4000 (the address space, 8aa) and never under the game's own value for the texture quality.
+// budget B, never over 4000 (past that the 32-bit address space runs out first) and never under the game's own
+// value for the texture quality.
 // O rises with the render targets: 900 MB at 1080p (X 373) to 1,100 at 4K (X 799), above everything measured.
 // FusionFix's ExtraStreamingMemory raises the 0.9 up to 1.5: then 1.5 is assumed.
 // ---------------------------------------------------------------------------------------------
 #define T_MAX_MB 4000
 // The floor: never take the game below what it would have used on its own. Which row of the table the game reads is
-// not fixed. With -nomemrestrict (FusionFix's ExtraStreamingMemory sets it) it reads row 15; without it, 0x40F265
-// picks row 12, 13 or 14 by the card's vendor, and row 12 at High is 550 MB where row 15 is 800. So the floor is the
-// smallest of the four rows the running game could reach, read from the table itself before anything is written to it.
+// not fixed: with -nomemrestrict it reads row 15, without it 0x40F265 picks row 12, 13 or 14 by the card's vendor,
+// and row 12 at High is 550 MB where row 15 is 800. Taking the smallest of all four, as SISCO first did, put the
+// floor at 550 on installs the game itself runs at 800, and the brake then stepped the budget below what the game
+// would have used on its own, with the traffic budgets following it down. So the floor asks the game's question.
 static int StockBudgetMb(int quality) { return quality <= 0 ? 300 : quality == 1 ? 400 : 800; }   // row 15, the largest
-static int StockFloorMb(uintptr_t table, int quality) {
+// The stock test, built at run time the way every other absolute-address site is: its operand is the slot's address
+// as the loader relocated it (both exes have DYNAMIC_BASE and that operand is a HIGHLOW relocation), so the file's
+// bytes never match a running game. Only the rel32 tail is fixed: 0x158 on 1.0.8.0, 0x162 on the Complete Edition.
+static void MemRestrictTestStock(const CoreSites& c, uint8_t out[13]) {
+    uint32_t slot = (uint32_t)c.prmNoMemRestrict, rel = c.build == BUILD_CE ? 0x162u : 0x158u;
+    out[0] = 0x83; out[1] = 0x3D; memcpy(out + 2, &slot, 4); out[6] = 0x00; out[7] = 0x0F; out[8] = 0x85; memcpy(out + 9, &rel, 4);
+}
+// FusionFix rewrites the test on EVERY install (an inline hook over its 13 bytes, in both of its modes) and decides
+// inside the hook: ExtraStreamingMemory off runs row 15, on falls through to the vendor rows, and the player's own
+// -nomemrestrict is ignored either way. So a rewritten test is read with the signal that tells the two modes apart,
+// the hook FusionFix puts on the credit function only when ExtraStreamingMemory is on; a stock test is the game's
+// own question, the slot.
+static bool GameRunsRow15(const CoreSites& c, bool extraStreaming) {
+    uint8_t stock[13]; MemRestrictTestStock(c, stock);
+    if (c.memRestrictTest && !BytesEq(c.memRestrictTest, stock, 13)) return !extraStreaming;
+    uint32_t slot = 0;
+    return c.prmNoMemRestrict && RdU32(c.prmNoMemRestrict, &slot) && slot;
+}
+static int StockFloorMb(const CoreSites& c, int quality, bool extraStreaming) {
+    uint64_t cell = 0;
+    if (GameRunsRow15(c, extraStreaming)) {
+        if (RdU64(c.table + 8 * (3 * 15 + quality), &cell) && (cell >> 20) > 0) return (int)(cell >> 20);
+        return StockBudgetMb(quality);
+    }
     int lo = 0;
-    for (int row = 12; row <= 15; row++) {
-        uint64_t cell = 0;
-        if (!RdU64(table + 8 * (3 * row + quality), &cell)) continue;
+    for (int row = 12; row <= 14; row++) {
+        if (!RdU64(c.table + 8 * (3 * row + quality), &cell)) continue;
         int mb = (int)(cell >> 20);
         if (mb > 0 && (!lo || mb < lo)) lo = mb;
     }
@@ -958,6 +1316,10 @@ static int SizeBudget(int64_t bMb, int64_t xMb, int tStock, bool extra, int* tVr
 // scaled down with it to the game's own values at its stock budget, so a small card keeps its world. A larger value
 // already there (FusionFix's VehicleBudget or PedBudget) stands. Bytes, as FusionFix writes them.
 #define CARPED_FULL 200000000u
+// The most car budget the game's OWN VehicleStruct pool can use. Its guard keeps 20 of its 50 slots free, so about
+// 30 loaded models is the ceiling without the raise, and the ladder measured 24 loaded at 120 MB, 31 at 160 and 41
+// at 200. Past this a refused pool raise means the extra budget buys nothing, so the budget stops here instead.
+#define CAR_NO_POOL 120000000u
 #define CAR_STOCK 40000000u
 #define PED_STOCK 50000000u
 static uint32_t CarPedFor(uint32_t stock, int t, int tStock) {
@@ -969,8 +1331,46 @@ static uint32_t CarPedFor(uint32_t stock, int t, int tStock) {
 // ---------------------------------------------------------------------------------------------
 // What the sizing decided, read by the brake when the traffic budgets follow it.
 static bool g_sized;
+static bool g_worldLogged;    // a "world" line has been written: the player has appeared after a load at least once
+static uint32_t g_worldFrame; // the game's frame counter when the player last appeared, and the worker's clock then
+static int64_t g_worldMs, g_tickMs;
+// One load at a time, from the player appearing to the world built around them: the phase -managed makes slow, timed
+// by the render targets, which are built in stages during it and hold once it is over. The verdict is the load line;
+// a slow one is named as far as SISCO can see and handed to the worker for the file beside the log. LoadTick below.
+static bool g_ldUp;              // the loading flag was up on the last tick
+static bool g_ldPending = true;  // the flag is down and the player has not appeared yet: the next appearance is a load's edge
+static int64_t g_ldEdgeMs;       // the worker's clock when the player appeared, 0 while no load is being timed
+static int64_t g_ldChangeMs;     // the last tick the render targets changed since the edge: the build's end once they hold
+static uint32_t g_ldChangeFrame; // the game's frame counter then
+static int64_t g_ldX;            // the render targets on the last tick, -1 while not built
+static int g_ldSteady;           // ticks they have held that size
+static bool g_ldVerdict;         // the load line has been written for this load
+static int g_loadN;              // loads timed this run
+static int64_t g_loadBuildS;     // the last build, in whole seconds: from the edge to the render targets' last change
+static int g_loadFps = -1;       // the game's frame rate over that build, where its counter is known; -1 = not measured
+static char g_slowLoadNote[700] = "";   // the last slow load with -managed in effect, named as far as it can be seen; empty otherwise
+static volatile LONG g_slowLoadPending; // 1 once per slow load: the worker writes the file beside the log and clears it
+#define LOAD_STEADY_TICKS 3      // the render targets have held this long after a change: the build is over
+#define LOAD_HOLD_MS 15000       // presents go out immediately at least this long after the player appears, in case a stage holds
+#define LOAD_CEILING_MS 90000    // and never longer than this, whatever the render targets do
+#define LOAD_SLOW_S 20           // a build longer than this with -managed is a slow load: 2 s measured unheld, 27 to 61 held
 static int g_sizedT, g_sizedTStock, g_sizedX;
+static bool g_carHeld;        // the car budget stopped where the game's own VehicleStruct pool can use it
+static uint32_t g_setView, g_setDetail, g_setCars;   // the sliders as read at sizing, for the log and the harness
 static int64_t g_settleX = -1; static int g_settleTicks;   // the render targets grow in stages while the world loads
+// How long the render targets must hold the same size before the budget is sized against them. They are built in
+// stages while the world loads, and the player appears and the loading byte clears BEFORE the last stage: measured
+// at 63 MB after the player appeared, for two seconds on the clean install and for the whole 23 s world build on
+// the heavy one (run D3), and two ticks let that install size against the half-built figure in the middle of its
+// load. A part-built figure changes within seconds on a normal load; the final one holds for the whole session.
+#define SETTLE_TICKS 10
+// A set under 128 MB is a part-built one, unless it is at least twice the smallest set seen this run (the first
+// stage is 28 MB at 1080p in two players' logs and 63 at 4K here, and no later stage of the same build is under
+// twice that) or it has held for SETTLE_LONG_TICKS (no part-built stage ever held longer than 23 s, measured on
+// the heavy install). A finished set is 252 MB at 1080p (a player's log), which scales to about 128 at 1366x768
+// and 112 at 720p, figures no run here has measured: with the plain minimum those machines were never sized at all.
+#define SETTLE_LONG_TICKS 45
+static int64_t g_rtMin;       // the smallest render-target set seen this run, in MB; 0 until one is seen
 
 // The brake, proven in the field without a texture pack, which is the hard case. Without a pack, a large
 // budget holds so many models that the 32-bit address space runs out before V reaches the budget: DXVK keeps a mapped
@@ -1097,7 +1497,7 @@ static uint64_t LargestFreeBlock() {
 // targets grew (a higher resolution), and the brake.
 // ---------------------------------------------------------------------------------------------
 static bool g_extraStreaming;
-static char g_sizeNote[400] = "not yet: the world is not loaded";
+static char g_sizeNote[800] = "not yet: the world is not loaded";
 // The player exists and stands somewhere in the world: how SISCO tells the game from the main menu, where the streamer is
 // already up, the loading screen is down and the render targets are still the menu's, measured at 63 MB at 4K where
 // the world's are 797. A budget sized against the menu's would be far too large on a small card.
@@ -1139,43 +1539,93 @@ static void AudioNote(const CoreSites& c, char* out, size_t outCap) {
                 : slots && slots < limit ? "; a distinct car model past that many near you plays no engine sound" : "");
 }
 
+// What the sizing works from: the card's own figure, bounded by the player's -availablevidmem if they set one.
+// That option is what the game believes it has, so a budget sized past it is one the game cannot reach, and the
+// traffic budgets that scale off it would be taking their share of a pool that size instead.
+static int64_t CardBudgetMb() {
+    int64_t b = -1;
+    if (g_dxgiState == 0) DxgiInit();
+    int64_t mb = DxgiPoll(&b) ? b >> 20 : g_bootBudgetMb;
+    if (g_playerVidmemMb > 0 && mb > g_playerVidmemMb) mb = g_playerVidmemMb;
+    return mb;
+}
+
 static bool WorldReady(int64_t* xMb) {
     uint32_t n = 0; uint64_t x = 0;
     if (!RdU32(g_cs.streamerN, &n) || !n || !RdU64(g_cs.rt0, &x) || !x) return false;
     *xMb = (int64_t)(x >> 20);
     return true;
 }
+// The game's own decision about managed resources, read rather than assumed. SISCO writes the -managed launch
+// option before the game reads it, but three things undo that and none of them are visible from the write: the
+// player's own -unmanaged, the player's own -nominimize (which the game tests AFTER -managed, so it wins), and
+// the Direct3D hook never firing, in which case nothing was written at all. Run D measured DXVK without managed
+// resources collapsing the address space at a budget of 1400, well under the 4000 SISCO asks for, so a raised
+// budget behind an unmanaged pool is the configuration to refuse.
+// Only a confident 0 counts. The game writes 0 or 1 there and nothing else, so an unreadable slot or any other
+// value means SISCO is not looking at what it thinks it is, and then it leaves the decision alone.
+static bool PoolUnmanaged() {
+    uint32_t mode = 0xFFFFFFFFu;
+    if (!g_cs.poolMode || !RdU32(g_cs.poolMode, &mode)) return false;
+    return mode == 0;
+}
+
 static void SisSize(int64_t xMb) {
     g_sized = true;
+    g_carHeld = false;
     char audio[200]; AudioNote(g_cs, audio, sizeof(audio));
     SisLog("audio", "%s", audio);
+    // The sliders decide how much world the game asks for, so no two reports compare without them. Read only.
+    g_setView = g_setDetail = g_setCars = 0xFFFFFFFFu;
+    RdU32(g_cs.setView, &g_setView); RdU32(g_cs.setDetail, &g_setDetail); RdU32(g_cs.setCars, &g_setCars);
+    SisLog("display", "view distance %u, detail distance %u, car density %u", g_setView, g_setDetail, g_setCars);
+    // What the game actually built, read back now that every plugin has loaded and every pool exists. A raise that
+    // another plugin undid after SISCO is marked here, and the gate below then holds the budget.
+    if (g_set.limits) { ReadBackRaises(g_cs); SisLog("built", "%s", g_builtNote); }
+    // g_dxvk is what Direct3DCreate9 found. If the hook never fired it is still -1 here, and vulkan-1.dll answers
+    // instead: DXVK loads it when it builds its Direct3D object, long before the world is ready, so by now it is
+    // there. Both are facts about the running process, never a guess, and the log says which one decided.
     bool dxvk = g_dxvk == 1 || (g_dxvk < 0 && VulkanLoaded());
+    const char* saw = g_dxvk < 0 ? " (Direct3DCreate9 was never seen; vulkan-1.dll is loaded)" : "";
     if (!dxvk) {
-        _snprintf_s(g_sizeNote, sizeof(g_sizeNote), _TRUNCATE, "native Direct3D 9%s: the budget, the car and ped budgets stay the "
-                    "game's; the fixes apply", g_dxvk < 0 ? " (Direct3DCreate9 was not seen)" : "");
+        _snprintf_s(g_sizeNote, sizeof(g_sizeNote), _TRUNCATE, "native Direct3D 9%s: not supported, SISCO requires DXVK (the vulkan.dll in "
+                    "the download); the budget, the car and ped budgets are left alone", g_dxvk < 0 ? " (Direct3DCreate9 was not seen)" : "");
         SisLog("size", "%s", g_sizeNote);
         return;
     }
     uint32_t q = 2; RdU32(g_cs.quality, &q); if (q > 2) q = 2;
-    int tStock = StockFloorMb(g_cs.table, (int)q);
-    int64_t b = -1;
-    if (g_dxgiState == 0) DxgiInit();
-    int64_t bMb = DxgiPoll(&b) ? b >> 20 : g_bootBudgetMb;
+    // FusionFix's ExtraStreamingMemory shows as its hook on the credit function; the floor needs it first.
     uint8_t g0 = 0x55; __try { g0 = *(uint8_t*)g_cs.gafm; } __except (EXCEPTION_EXECUTE_HANDLER) {}
     g_extraStreaming = g0 != 0x55;
+    int tStock = StockFloorMb(g_cs, (int)q, g_extraStreaming);
+    int64_t bMb = CardBudgetMb();
+    const char* vmNote = (g_playerVidmemMb > 0 && bMb == g_playerVidmemMb) ? ", bounded by your own -availablevidmem" : "";
+    // A player's own -memrestrict N: the game computes its budget from that figure and never reads the table, so
+    // anything written there changes nothing, and the log must not say it did.
+    uint32_t mrSlot = 0; RdU32(g_cs.prmMemRestrict, &mrSlot);
     int tVram = 0;
     int t = bMb > 0 ? SizeBudget(bMb, xMb, tStock, g_extraStreaming, &tVram) : tStock;
     uint64_t cell = 0; RdU64(g_cs.table + 8 * (45 + q), &cell);
     int cellMb = (int)(cell >> 20);
     bool keptCell = cellMb > t && cellMb <= T_MAX_MB;
     if (keptCell) t = cellMb;
-    // A raised budget is only safe behind the things that were raised to survive it: the two pools it fills, and the
-    // release queue it overflows on the way out. If any of those was refused, the budget stays the game's own, because
-    // raising it then would create exactly the load the refused raise existed to carry (a dry link pool is fatal even
-    // with the lock fix, and the quit burst passes 65,536 even without a texture pack).
+    // A raised budget is only safe behind the things that were raised to survive it: the two pools it fills, the
+    // release queue it overflows on the way out, and the arena it loads through. If any of those was refused the
+    // budget stays the game's own, because raising it then would create exactly the load the refused raise existed to
+    // carry. Measured: a dry link pool is fatal even with the lock fix; the quit burst passes 65,536 with no texture
+    // pack at all; and a budget raised while the arena stays at the game's 160 MiB moves the problem to the arena
+    // within about 80 s of driving, where it fails by fragmentation and the world silently disappears.
+    // The arena belongs in this list because it is raised before Direct3D exists, inside the CRT initialisers, and a
+    // refused raise there is the only thing standing between a raised budget and an empty world.
     const char* needs = g_site[S_LINK_SIZE].state != ST_ON ? "the link pool was not raised"
                       : g_site[S_SLOT_SIZE].state != ST_ON ? "the drawable-slot pool was not raised"
-                      : !g_fixInstalled ? "the release-queue fix is not in" : NULL;
+                      : !g_fixInstalled ? "the release-queue fix is not in"
+                      : !g_linkFixInstalled ? "the link-pool lock fix is not in"
+                      : g_site[S_ARENA_SIZE].state != ST_ON ? "the streaming arena was not raised"
+                      : g_capNote[0] ? g_capNote
+                      : mrSlot ? "your own -memrestrict sets the budget, and the game does not read the table then"
+                      : PoolUnmanaged() ? (g_dxvk < 0 ? "SISCO never saw Direct3DCreate9, so -managed was never written and the game runs its pool unmanaged"
+                                                     : "the game is not using Direct3D managed resources (-unmanaged or -nominimize is set)") : NULL;
     if (needs) t = tStock;
     g_sizedT = t; g_sizedTStock = tStock; g_sizedX = (int)xMb;
     bool wrote = needs ? false : WriteBudgetAll(g_cs.table, t);
@@ -1186,6 +1636,8 @@ static void SisSize(int64_t xMb) {
     if (lowRam) { g_car.target = car; g_ped.target = ped; }
     else {
         uint32_t wantCar = CarPedFor(CAR_STOCK, t, tStock), wantPed = CarPedFor(PED_STOCK, t, tStock);
+        // The car budget is only worth raising as far as there are slots to hold the models it pays for.
+        if (g_site[S_VSTRUCT].state != ST_ON && wantCar > CAR_NO_POOL) { wantCar = CAR_NO_POOL; g_carHeld = true; }
         g_car.on = g_ped.on = true;
         g_car.written = car; g_ped.written = ped;
         // A larger value that was already there is another mod's, exactly as it is when the guard meets one later.
@@ -1197,23 +1649,24 @@ static void SisSize(int64_t xMb) {
         TrafficSet(g_ped, ped > wantPed ? ped : wantPed);
     }
     if (wrote) BrakeStart(t, tStock);
-    char held[120] = "";
+    char held[320] = "";
     if (needs) _snprintf_s(held, sizeof(held), _TRUNCATE, ", LEFT AT THE GAME'S OWN: %s", needs);
     else if (!wrote) strcpy_s(held, " NOT WRITTEN");
     _snprintf_s(g_sizeNote, sizeof(g_sizeNote), _TRUNCATE,
-                "DXVK; card budget %lld MB, render targets %lld MB, others %d MB%s: budget %d MB (the card allows %d, the game's "
-                "own %d%s)%s; car %u MB, ped %u MB%s%s", bMb, xMb, OtherMb(xMb),
+                "DXVK%s; card budget %lld MB%s, render targets %lld MB, others %d MB%s: budget %d MB (the card allows %d, the game's "
+                "own %d%s)%s; car %u MB, ped %u MB%s%s", saw, bMb, vmNote, xMb, OtherMb(xMb),
                 g_extraStreaming ? ", FusionFix's ExtraStreamingMemory assumed (the credit function is hooked)" : "", t, tVram,
                 tStock, keptCell ? "; a larger value already in the table kept" : "", held,
-                g_car.target / 1000000, g_ped.target / 1000000, lowRam ? " (the game's low-memory values kept)" : "",
-                car > CarPedFor(CAR_STOCK, t, tStock) || ped > CarPedFor(PED_STOCK, t, tStock) ? " (a larger value from FusionFix kept)" : "");
+                g_car.target / 1000000, g_ped.target / 1000000,
+                lowRam ? " (the game's low-memory values kept)"
+                       : g_carHeld ? " (car held where the game's own VehicleStruct pool can use it)" : "",
+                car > CarPedFor(CAR_STOCK, t, tStock) || ped > CarPedFor(PED_STOCK, t, tStock) ? " (a larger value another mod set kept)" : "");
     SisLog("size", "%s", g_sizeNote);
 }
 // The render targets grew (the player raised the resolution): lower the budget to what the card allows now. Never raised.
 static void SisResize(int64_t nowMs, int64_t xMb) {
     if (xMb - g_sizedX < 8) return;
-    int64_t b = -1;
-    int64_t bMb = DxgiPoll(&b) ? b >> 20 : g_bootBudgetMb;
+    int64_t bMb = CardBudgetMb();
     int t = bMb > 0 ? SizeBudget(bMb, xMb, g_sizedTStock, g_extraStreaming, NULL) : g_sizedTStock;
     g_sizedX = (int)xMb;
     if (!g_brakeOn || t >= g_brakeSt.t) return;
@@ -1224,28 +1677,109 @@ static void SisResize(int64_t nowMs, int64_t xMb) {
     SisLog("size", "render targets now %lld MB at %lld s: budget %d -> %d MB", xMb, nowMs / 1000, before, t);
     TrafficFollow(t, g_sizedTStock);
 }
+// The verdict on a load: the load line, and the slow rule.
+static void LoadVerdict(int64_t nowMs, bool ceiling) {
+    int64_t buildMs = ceiling ? nowMs - g_ldEdgeMs : g_ldChangeMs - g_ldEdgeMs;
+    g_loadBuildS = buildMs / 1000;
+    g_loadFps = -1;
+    if (g_cs.frameCounter && !ceiling && buildMs >= 1000 && g_ldChangeFrame > g_worldFrame)
+        g_loadFps = (int)(((int64_t)(g_ldChangeFrame - g_worldFrame) * 1000) / buildMs);
+    char rate[64] = "";
+    if (g_loadFps >= 0) _snprintf_s(rate, sizeof(rate), _TRUNCATE, " at %d fps", g_loadFps);
+    else if (!g_cs.frameCounter) strcpy_s(rate, " (the frame rate is not read on this build)");
+    if (ceiling) SisLog("load", "the render targets never held for %d s in the %lld s since the player appeared: the build's end could not be seen", LOAD_STEADY_TICKS, g_loadBuildS);
+    else SisLog("load", "the world built in %lld s after the player appeared%s%s", g_loadBuildS, rate,
+                g_presentImmediate ? " (presenting without waiting for VSync)" : "");
+    // A slow load with -managed in effect is the wait players report: 2 s when nothing holds the build back, 27 to 61 s
+    // behind VSync or a cap (runs L4, L7, L10). Said here, named as far as SISCO can see, and written by the worker
+    // into a file beside the log.
+    if (!g_managedOn || g_loadBuildS <= LOAD_SLOW_S) return;
+    char seen[300];
+    if (g_frameCap > 0) _snprintf_s(seen, sizeof(seen), _TRUNCATE, "DXVK's own frame cap of %d fps (%s)", g_frameCap, g_frameCapFrom);
+    else if (g_forcedInterval >= 1) _snprintf_s(seen, sizeof(seen), _TRUNCATE, "VSync forced in DXVK's config (d3d9.presentInterval %d), which SISCO cannot present past", g_forcedInterval);
+    else if (RtssLoaded()) strcpy_s(seen, "RTSS is loaded, and a frame limit set there is the likeliest cause");
+    else strcpy_s(seen, "nothing SISCO can see: the driver's control panel (a Max Frame Rate for GTAIV.exe) or a limiter that hooks the game; "
+                        "if no limit is set anywhere, this machine renders the world that slowly and this note is a false alarm");
+    _snprintf_s(g_slowLoadNote, sizeof(g_slowLoadNote), _TRUNCATE,
+                "the world took %lld s to build after the player appeared%s, with -managed in effect (about 2 s when nothing holds it back). "
+                "That is the wait a frame-rate limit causes: %s. Lift the limit while the game loads, or set Budget=0 in SISCO.ini.",
+                g_loadBuildS, rate, seen);
+    SisLog("slowload", "%s", g_slowLoadNote);
+    InterlockedExchange(&g_slowLoadPending, 1);
+}
+// Once a second from the worker, before the sizing: the load being timed, and the presents while its world builds.
+static void LoadTick(int64_t nowMs, bool loadingUp, bool playerIn, bool ready, int64_t xMb) {
+    uint32_t fr = 0; bool haveFrame = g_cs.frameCounter && RdU32(g_cs.frameCounter, &fr);
+    if (loadingUp) {
+        // A load begins (or the menu is up): a load still being timed is dropped, and its presents go back to the game's.
+        if (g_ldEdgeMs) { g_ldEdgeMs = 0; g_presentImmediate = 0; }
+        g_ldUp = true; g_ldPending = false;
+        return;
+    }
+    if (g_ldUp) { g_ldUp = false; g_ldPending = true; }
+    if (g_ldPending) {
+        if (!playerIn) return;           // the main menu: the streamer is up and the flag down, but nobody is in the world
+        g_ldPending = false;
+        g_ldEdgeMs = g_worldMs = g_ldChangeMs = nowMs; g_worldFrame = g_ldChangeFrame = haveFrame ? fr : 0;
+        g_ldX = ready ? xMb : -1; g_ldSteady = 0; g_ldVerdict = false; g_loadN++;
+        if (g_swapVtblHooked) { g_immediatePresents = 0; g_presentImmediate = 1; }
+        g_worldLogged = true;
+        // The game's loading flag drops when the player entity exists, while the world still streams in around it
+        // and the visible loading screen stays up until it has: the phase timed from here is that build.
+        SisLog("world", "the player exists and the game's loading flag is down; the world builds from here (the loading screen may still show); render targets %lld MB%s",
+               ready ? xMb : 0, ready ? "" : " (not built yet)");
+        return;
+    }
+    if (!g_ldEdgeMs) return;
+    int64_t x = ready ? xMb : -1;
+    if (x != g_ldX) { g_ldX = x; g_ldSteady = 0; g_ldChangeMs = nowMs; g_ldChangeFrame = haveFrame ? fr : 0; }
+    else g_ldSteady++;
+    if (x >= 0 && (g_rtMin <= 0 || x < g_rtMin)) g_rtMin = x;
+    // A set under 128 MB that is not twice the smallest seen is a part-built stage that can hold for a whole build
+    // (the sizing's rule, at SETTLE_LONG_TICKS above): the build is not over until it has held that long.
+    bool partBuilt = x < 128 && x < 2 * g_rtMin;
+    bool built = x >= 0 && g_ldSteady >= LOAD_STEADY_TICKS && (!partBuilt || g_ldSteady >= SETTLE_LONG_TICKS);
+    bool ceiling = nowMs >= g_ldEdgeMs + LOAD_CEILING_MS;
+    if (!g_ldVerdict && (built || ceiling)) { g_ldVerdict = true; LoadVerdict(nowMs, ceiling && !built); }
+    if (g_ldVerdict && nowMs >= g_ldEdgeMs + LOAD_HOLD_MS) {
+        if (g_presentImmediate) {
+            g_presentImmediate = 0;
+            SisLog("present", "VSync handed back %lld s after the player appeared: %ld presents went out immediately while the world built",
+                   (nowMs - g_ldEdgeMs) / 1000, g_immediatePresents);
+        }
+        g_ldEdgeMs = 0;
+    }
+}
 // Once a second, from the worker thread. lMb: the largest free block of the address space, in MB.
 static void SisTick(int64_t nowMs, int64_t lMb) {
     int64_t xMb = 0;
+    g_tickMs = nowMs;
+    uint32_t loading = 0; RdU32(g_cs.loading, &loading);
+    bool loadingUp = (loading & 0xFF) != 0;
+    bool ready = WorldReady(&xMb), playerIn = PlayerInWorld();
+    LoadTick(nowMs, loadingUp, playerIn, ready, xMb);
     if (!g_sized) {
         // Size only when the streamer is up, the player is in the world (not at the main menu), the loading screen is
-        // down and the render targets have read the same size twice running: they are created in stages, measured at
-        // 63 MB, then 468, then 797 at 4K, and a budget sized against a part-built figure would be far too large on a
-        // small card.
-        uint32_t loading = 0; RdU32(g_cs.loading, &loading);
-        if (!WorldReady(&xMb) || (loading & 0xFF) || !PlayerInWorld()) { g_settleX = -1; g_settleTicks = 0; return; }
+        // down and the render targets have held the same size for SETTLE_TICKS seconds: they are created in stages,
+        // measured at 63 MB, then 468, then 797 at 4K, the player appears before the last stage, and a budget raised
+        // against a part-built figure is raised while the world is still loading, which slows that load badly.
+        // Under 128 MB the render targets are still their first build stage (63 MB at 4K, 28 at 1080p; finished
+        // sets are 765 and 252), and on a heavy install that stage can hold for the whole save load, longer than
+        // any number of steady ticks. Never size against it.
+        if (!ready || loadingUp || !playerIn) { g_settleX = -1; g_settleTicks = 0; return; }
+        if (g_rtMin <= 0 || xMb < g_rtMin) g_rtMin = xMb;
         if (xMb != g_settleX) { g_settleX = xMb; g_settleTicks = 0; return; }
-        if (++g_settleTicks < 2) return;
+        if (++g_settleTicks < SETTLE_TICKS) return;
+        if (xMb < 128 && xMb < 2 * g_rtMin && g_settleTicks < SETTLE_LONG_TICKS) return;   // part-built, see SETTLE_LONG_TICKS
         SisSize(xMb);
         return;
     }
     TrafficGuard(g_ped); TrafficGuard(g_car);
-    if (!g_brakeOn || !WorldReady(&xMb)) return;
+    if (!g_brakeOn || !ready) return;
     SisResize(nowMs, xMb);
-    uint64_t v = 0; uint32_t loading = 0;
+    uint64_t v = 0;
     if (!RdU64(g_cs.cacheV, &v)) return;
-    RdU32(g_cs.loading, &loading);
-    BrakeTick(g_cs.table, nowMs, (int64_t)(v >> 20), xMb, lMb, (loading & 0xFF) != 0);
+    BrakeTick(g_cs.table, nowMs, (int64_t)(v >> 20), xMb, lMb, loadingUp);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1363,18 +1897,37 @@ static bool ParamReadersMatch(const CoreSites& c) {
            FormEq(c.rdManaged, c.paramCmpForm, (uint32_t)c.prmManaged) &&
            FormEq(c.rdVidmem, F_LOAD_EAX, (uint32_t)c.prmVidmem);
 }
-// Everything SISCO does at load, in order. `dxvkPredicted`: the arena is raised only for DXVK.
+// Everything SISCO does at load, in order.
 struct SisLoadResult { bool queue, lock, race, arena, d3d, params; };
-static SisLoadResult SisInstall(const CoreSites& c, bool dxvkPredicted) {
+// The frame counter is read for the load line only, and only while the instruction that advances it is where SISCO
+// expects it (add dword ptr [counter], 1, its operand rebased as the loader did): a build that moved either would
+// give a rate of nothing in particular.
+static void PinFrameCounter(CoreSites& c) {
+    if (!c.frameCounter || !c.frameInc) { c.frameCounter = 0; return; }
+    uint8_t inc[7] = { 0x83, 0x05, 0, 0, 0, 0, 0x01 };
+    uint32_t a = (uint32_t)c.frameCounter; memcpy(inc + 2, &a, 4);
+    if (!BytesEq(c.frameInc, inc, 7)) c.frameCounter = 0;
+}
+static SisLoadResult SisInstall(const CoreSites& c) {
     SisLoadResult r = {};
     g_cs = c;
-    r.queue = InstallQueueFix(c);
-    r.lock = InstallLinkLockFix(c);
-    r.race = InstallRaceFix(c);
-    RaiseVehicleStruct(c, 100);
-    RaisePools(c, 32768, 65536);
-    if (dxvkPredicted) r.arena = RaiseArena(c, 400);
-    else SiteSet(S_ARENA_SIZE, ST_OFF_DISABLED, "native Direct3D 9 predicted: the game's 160 MiB");
+    PinFrameCounter(g_cs);
+    if (g_set.fixes) {
+        r.queue = InstallQueueFix(c);
+        r.lock = InstallLinkLockFix(c);
+        r.race = InstallRaceFix(c);
+    }
+    if (g_set.limits) {
+        RaiseVehicleStruct(c, 100);
+        RaisePools(c, 32768, 65536);
+    }
+    // Always, on every renderer. The arena has to be sized before the game builds it, which happens inside the
+    // CRT initialisers, before WinMain and so before any Direct3D exists: there is nothing here to ask. SISCO used
+    // to guess from a config file that only one install arrangement has, and a player running DXVK as their own
+    // d3d9.dll was guessed wrong and left with a raised budget loading through a stock arena, which empties the
+    // world. Raising it always is measured to cost nothing that matters: without DXVK the budget stays the game's
+    // own, the extra room is never the binding limit, and a texture pack can exhaust the stock arena by itself.
+    if (g_set.limits) r.arena = RaiseArena(c, 400);
     r.params = ParamReadersMatch(c);
     if (r.params) r.d3d = InstallD3DHook(c);
     else SiteSet(S_D3D_IAT, ST_OFF_MISMATCH, "a launch-option reader differs: nothing is set at Direct3DCreate9");
@@ -1399,6 +1952,10 @@ static CoreSites Sites1080() {
     c.d3dIat = VA(A_D3D_IAT); c.d3dThunk = VA(A_D3D_THUNK); c.d3dCall = VA(A_D3D_CALL);
     c.rdUnmanaged = VA(A_RD_UNMANAGED); c.rdManaged = VA(A_RD_MANAGED); c.rdVidmem = VA(A_RD_VIDMEM);
     c.prmUnmanaged = VA(D_PARAM_UNMANAGED); c.prmManaged = VA(D_PARAM_MANAGED); c.prmVidmem = VA(D_PARAM_VIDMEM);
+    c.poolMode = VA(D_POOL_MODE);
+    c.memRestrictTest = VA(A_MEMRESTRICT_TEST); c.prmNoMemRestrict = VA(D_PARAM_NOMEMRESTRICT); c.prmMemRestrict = VA(D_PARAM_MEMRESTRICT);
+    c.setView = VA(D_SET_VIEW); c.setDetail = VA(D_SET_DETAIL); c.setCars = VA(D_SET_CARS);
+    c.frameCounter = VA(D_FRAME); c.frameInc = VA(A_FRAME_INC);
     c.table = VA(D_TABLE); c.quality = VA(D_QUALITY); c.rt0 = VA(D_RT0); c.cacheV = VA(D_CACHE) + C_V;
     c.streamerN = VA(D_STREAMER) + 4; c.loading = VA(D_LOADING); c.vehBudget = VA(D_VEH_BUDGET); c.pedBudget = VA(D_PED_BUDGET);
     c.playerInfo = VA(D_PLAYERINFO);
@@ -1426,6 +1983,10 @@ static CoreSites SitesCe() {
     c.d3dIat = VA(CE_A_D3D_IAT); c.d3dThunk = 0; c.d3dCall = VA(CE_A_D3D_CALL);
     c.rdUnmanaged = VA(CE_A_RD_UNMANAGED); c.rdManaged = VA(CE_A_RD_MANAGED); c.rdVidmem = VA(CE_A_RD_VIDMEM);
     c.prmUnmanaged = VA(CE_D_PARAM_UNMANAGED); c.prmManaged = VA(CE_D_PARAM_MANAGED); c.prmVidmem = VA(CE_D_PARAM_VIDMEM);
+    c.poolMode = VA(CE_D_POOL_MODE);
+    c.memRestrictTest = VA(CE_A_MEMRESTRICT_TEST); c.prmNoMemRestrict = VA(CE_D_PARAM_NOMEMRESTRICT); c.prmMemRestrict = VA(CE_D_PARAM_MEMRESTRICT);
+    c.setView = VA(CE_D_SET_VIEW); c.setDetail = VA(CE_D_SET_DETAIL); c.setCars = VA(CE_D_SET_CARS);
+    c.frameCounter = 0; c.frameInc = 0;         // the Complete Edition's counter is not carried yet: no rate on its load line
     c.table = VA(CE_D_TABLE); c.quality = VA(CE_D_QUALITY); c.rt0 = VA(CE_D_RT0); c.cacheV = VA(CE_D_CACHE) + C_V;
     c.streamerN = VA(CE_D_STREAMER) + 4; c.loading = VA(CE_D_LOADING); c.vehBudget = VA(CE_D_VEH_BUDGET); c.pedBudget = VA(CE_D_PED_BUDGET);
     c.playerInfo = VA(CE_D_PLAYERINFO);

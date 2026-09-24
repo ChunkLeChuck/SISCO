@@ -8,16 +8,56 @@ GTA IV is notorious for its texture streaming problems. Those of us who have bee
 
 SISCO raises the limits to better accommodate bigger mod installs, and fixes the things that break when you do.
 
-It supports **1.0.8.0** and the **Complete Edition (1.2.0.59)**. 
+It supports **1.0.8.0** and the **Complete Edition (1.2.0.59)**, and it requires **DXVK 3.x**, which is in the
+download. The game's own Direct3D 9 renderer is not supported. 
 
 ## Installing
 
-Put `SISCO.asi` in your `plugins` folder. If you run FusionFix you already have an ASI loader.
+Put `SISCO.asi` and `SISCO.ini` in your `plugins` folder, and `vulkan.dll` in the game folder next to `GTAIV.exe`,
+replacing the one FusionFix put there. If you run FusionFix you already have an ASI loader.
 
-To uninstall, delete it. It never writes to a game file, and every change it makes lives in memory for that one run.
+`vulkan.dll` is DXVK 3.1.1, unmodified, under the file name FusionFix's D3D9 proxy loads DXVK by. It is the
+version SISCO is tested against; an older DXVK is not refused, and the log records the version and file it found.
+FusionFix's `d3d9.cfg` in the game folder must say `API = 1` under `[MAIN]`, which it already does if the game was
+running DXVK before. If you run DXVK as your own `d3d9.dll` instead of through FusionFix, rename the `vulkan.dll`
+from the download to `d3d9.dll` and use it in place of yours; it is the same file.
+
+To uninstall, delete `SISCO.asi` and `SISCO.ini`; `vulkan.dll` is only a newer DXVK and can stay. SISCO never writes
+to a game file, and every change it makes lives in memory for that one run.
 
 It writes `plugins\SISCO.log`: a short, plain record of what it changed and what it decided. That file is the first
 thing to look at if something seems wrong, and the thing to attach to a bug report.
+
+## If something goes wrong
+
+`SISCO.ini` has four switches and nothing else. They are all on, which is how the mod is meant to run, and you
+should only turn one off to find out which part of the mod is causing a problem.
+
+| | what it turns off |
+|---|---|
+| `Enabled=0` | everything. If the problem is still there, it is not SISCO (the `vulkan.dll` from the download stays in place; put your old one back to rule that out too) |
+| `Fixes=0` | the three bug fixes |
+| `Limits=0` | the bigger pools and the streaming arena |
+| `Budget=0` | the streaming budget, the traffic budgets and the brake |
+
+Only the number `0` turns something off. A typo, or a word like `off`, leaves that part on, so you cannot break it
+by mistyping. The log records which switches were on every run, so send it with any report.
+
+Turning `Limits` or `Fixes` off also stops the budget being raised, because a raised budget is only safe behind
+them. Every switch moves the game back towards how it runs without the mod.
+
+**VSync and frame-rate caps, and slow loading.** A raised budget needs the `-managed` launch option, and with it
+the world build after a load waits on every present: measured on a clean install, VSync alone (120 Hz) turned a
+2-second world build into 27 seconds, a 30 fps cap into 61, a 60 fps cap into 30, while the same build without
+`-managed` took 2 seconds under the 30 fps cap. So from the moment the player appears after a load SISCO presents
+without waiting for VSync until the world has built (and for at least 15 seconds), then hands VSync back; the log's
+`present` lines say so and count it. Frame-rate limiters are not covered by that, and neither is a VSync forced in
+DXVK's own config: SISCO reads `dxvk.conf` (and `DXVK_CONFIG_FILE`, `DXVK_CONFIG`) the way DXVK does, and a
+`maxFrameRate` cap or a `d3d9.presentInterval` there makes it leave `-managed` unset and the budget at the game's
+own, saying so. It cannot see RTSS's figure or the driver's cap, so if you use one of those, lift it while loading
+or set `Budget=0`. The log's `load` line times every build (on 1.0.8.0 with its frame rate), and when a build took
+over 20 seconds with the option in effect, SISCO writes `plugins\SISCO-SLOW-LOAD.txt`, a plain note of what it
+could see and what to do, and says the same on the log's `slowload` line.
 
 ## What it changes
 
@@ -33,10 +73,14 @@ Every one of these is a number the game already has.
 | list entries | 13,000 | 65,536 | when this pool runs dry, the game crashes |
 | VehicleStruct slots | 50 | 100 | more distinct cars need more of them |
 
-**Without DXVK**, the last four still apply and so do the three fixes, but the budget, the arena and the traffic
-budgets are left exactly as the game set them. GTA IV's own renderer cannot reach most of a modern card's memory, so
-there is nothing to raise the budget into. That path has not been measured: everything here was worked out and run
-under DXVK.
+SISCO tells DXVK from the game's own renderer by asking the Direct3D object itself, and reads DXVK's version from
+its module; the log's `direct3d` line says what it found. At sizing it also reads every raised value back from the
+game, so a value another mod set back after SISCO loaded is seen and counted as a refused raise.
+
+**DXVK is required.** SISCO is built and tested for DXVK 3.x, the `vulkan.dll` in the download. GTA IV's own
+renderer holds a copy of everything in system memory, so a raised budget eats the 32-bit address space instead of
+helping, and nothing about SISCO on Direct3D 9 is tested or supported: on it, SISCO leaves the budgets alone and says
+so in the log.
 
 ## How it was tested
 
@@ -51,7 +95,7 @@ one, so the steps are comparable.
 While driving I counted how often the game failed to show something, per kilometre, and how many different cars and
 people were on the street.
 
-79 runs in total. Most of them 6 to 15 minutes, and the longest 25 minutes to see if the fixes hold up.
+79 runs in total. Most of them 6 to 15 minutes, and the longest 21 minutes to see if the fixes hold up.
 
 ## The three fixes
 
@@ -72,15 +116,26 @@ These are bugs in the game, not in the mod. They are out of reach at the stock l
 
 GTA IV is 32-bit, so there is a hard ceiling on address space that no graphics card can raise. Once a second SISCO
 looks at how much room is left, and if it is running out it eases the budget back down a step at a time, taking it
-from the world and never from the traffic. Measured: the city thins slightly instead of the game falling over.
+from the world first; the car and ped budgets only follow once the world budget has fallen below 2000 MB. Measured:
+the city thins slightly instead of the game falling over.
 
 ## Alongside other mods
 
-- **FusionFix**: works with it. SISCO notices when its ExtraStreamingMemory option is on and sizes accordingly.
+- **FusionFix**: works with it. When its ExtraStreamingMemory option is on, SISCO assumes FusionFix's larger memory
+  credit when sizing; that combination has not been measured.
+- **DXVK**: required. The `vulkan.dll` in the download is 3.1.1, the version SISCO is tested against; the log
+  records the version it found, and a frame cap or a forced VSync in DXVK's own `dxvk.conf` holds the budget (see above).
 - **Anything that sets the same values**: a larger value another mod already set always stands. SISCO only raises.
-- **Every site is verified before it is written.** SISCO compares the exact bytes it expects at each of the twenty
-  places it patches, and if one does not match, that feature stays off and the log says which and why. It never
+  A mod that sets a value back after SISCO loaded is seen at sizing, when SISCO reads every raised value back from
+  the game: for the pools and the arena that raise then counts as refused and the budget stays the game's own; for
+  the VehicleStruct pool the car budget is held at 120 MB instead. The log names the site either way.
+  IVTweaker's MaxVehicleStruct hooks the pool's constructor rather than the size, so SISCO reads the count the pool
+  was actually built with.
+- **Every site is verified before it is written.** SISCO compares the exact bytes it expects at each of the
+  twenty-one places it patches, and if one does not match, that feature stays off and the log says which and why. It never
   half-installs: the queue fix in particular goes in completely or not at all, and rolls back if a write fails.
+  The two Direct3D vtable slots it writes (CreateDevice and the swap chain's Present) are DXVK's, not the game's:
+  each is read and chained, never compared against expected bytes, and written once.
 
 ## Building
 

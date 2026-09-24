@@ -3,5 +3,6 @@ dist/
 games.txt
 *.asi
 *.exe
+*.dll
 *.obj
 *.log

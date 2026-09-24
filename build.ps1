@@ -127,6 +127,9 @@ if ($Deploy) {
     $plugins = Join-Path $Deploy 'plugins'
     if (-not (Test-Path (Join-Path $Deploy 'GTAIV.exe'))) { throw "No GTAIV.exe in $Deploy" }
     Copy-Item $sis $plugins -Force
+    $iniSrc = Join-Path $root 'SISCO.ini'
+    $iniDst = Join-Path $plugins 'SISCO.ini'
+    if ((Test-Path $iniSrc) -and -not (Test-Path $iniDst)) { Copy-Item $iniSrc $iniDst }
     $h1 = (Get-FileHash $sis).Hash; $h2 = (Get-FileHash (Join-Path $plugins 'SISCO.asi')).Hash
     if ($h1 -ne $h2) { throw "Deployed copy differs from the build." }
     Write-Host "  SISCO.asi deployed to $plugins ($buildId, SHA256 $($h1.Substring(0,12)))" -ForegroundColor Green

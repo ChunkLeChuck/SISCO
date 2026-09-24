@@ -292,7 +292,21 @@ static HRESULT __stdcall FakeD3DQI(FakeD3D* self, REFIID riid, void** out) {
 }
 static ULONG __stdcall FakeD3DAddRef(FakeD3D* self) { return (ULONG)InterlockedIncrement(&self->refs); }
 static ULONG __stdcall FakeD3DRelease(FakeD3D* self) { return (ULONG)InterlockedDecrement(&self->refs); }
-static void* g_tD3DVtbl[3] = { (void*)FakeD3DQI, (void*)FakeD3DAddRef, (void*)FakeD3DRelease };
+struct FakeObj { void** vtbl; };
+static DWORD g_tSwapFlags = 0xFFFFFFFFu; static volatile LONG g_tSwapPresents;
+static HRESULT __stdcall FakeSwapPresent(void* sc, const RECT*, const RECT*, HWND, const RGNDATA*, DWORD flags) { g_tSwapFlags = flags; InterlockedIncrement(&g_tSwapPresents); return S_OK; }
+static ULONG __stdcall FakeNop(void*) { return 1; }
+static volatile LONG g_tSwapRefs;                    // GetSwapChain adds one, Release takes one: the hook must leave it at zero
+static ULONG __stdcall FakeSwapAddRef(void*) { return (ULONG)InterlockedIncrement(&g_tSwapRefs); }
+static ULONG __stdcall FakeSwapRelease(void*) { return (ULONG)InterlockedDecrement(&g_tSwapRefs); }
+static void* g_tSwapVtbl[4] = { (void*)FakeD3DQI, (void*)FakeSwapAddRef, (void*)FakeSwapRelease, (void*)FakeSwapPresent };
+static FakeObj g_tSwap = { g_tSwapVtbl };
+static HRESULT __stdcall FakeGetSwapChain(void*, UINT, void** out) { *out = &g_tSwap; InterlockedIncrement(&g_tSwapRefs); return S_OK; }
+static void* g_tDevVtbl[18] = { (void*)FakeD3DQI, (void*)FakeNop, (void*)FakeNop, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (void*)FakeGetSwapChain, 0, 0, 0 };
+static FakeObj g_tDev = { g_tDevVtbl };
+static volatile LONG g_tDevCreates;
+static HRESULT __stdcall FakeCreateDevice(void*, UINT, UINT, HWND, DWORD, void*, void** out) { *out = &g_tDev; InterlockedIncrement(&g_tDevCreates); return S_OK; }
+static void* g_tD3DVtbl[17] = { (void*)FakeD3DQI, (void*)FakeD3DAddRef, (void*)FakeD3DRelease, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (void*)FakeCreateDevice };
 static FakeD3D g_tD3D = { g_tD3DVtbl, 1, 1 };
 static volatile UINT g_tD3DSdk; static volatile LONG g_tD3DCreates;
 static void* WINAPI MockDirect3DCreate9(UINT sdk) { g_tD3DSdk = sdk; InterlockedIncrement(&g_tD3DCreates); return &g_tD3D; }
@@ -314,8 +328,16 @@ static const uint64_t kCtStockTable[48] = {
     0x12C00000, 0x15E00000, 0x22600000, 0x12C00000, 0x19000000, 0x2EE00000, 0x12C00000, 0x19000000, 0x2BC00000,
     0x12C00000, 0x19000000, 0x32000000 };
 static uint64_t g_tTab[48], g_tRt0, g_tV;
+static uint32_t g_tPoolMode;
 static uint32_t g_tQual = 2, g_tStreamN, g_tLoad, g_tVeh, g_tPed;
 static uint8_t g_tGafm[4] = { 0x55, 0x8B, 0xEC, 0x83 };
+static uint8_t g_tMemRestrictTest[13] = { 0x83, 0x3D, 0x78, 0xAB, 0x0A, 0x01, 0x00, 0x0F, 0x85, 0x58, 0x01, 0x00, 0x00 };
+static uint32_t g_tNoMemRestrict, g_tMemRestrict;
+static uint32_t g_tSetView = 99, g_tSetDetail = 99, g_tSetCars = 50;
+static uint32_t g_tFrame;                            // the game's frame counter, advanced by the cases that measure the load
+// The four size sites as the raises left them, and the VehicleStruct pool as the game built it, for the read-back at sizing.
+static uint8_t g_tSzSlot[5], g_tSzLink[5], g_tSzArena[5], g_tSzVs[9];
+static uint32_t g_tSzVsPoolObj[8], g_tSzVsPool;
 // The player as the game keeps it: CPlayerInfo*[32] -> +0x58C the ped -> +0x20 its matrix -> +0x30 the position.
 static float g_tPlayerMatrix[16]; static uint32_t g_tPlayerPed[0x100], g_tPlayerInfo[0x200];
 static void TPlayerInWorld(bool yes) {
@@ -331,14 +353,37 @@ static void TSizeReset(int dxvk, int64_t bootMb, uint32_t veh, uint32_t ped) {
     g_cs.table = (uintptr_t)g_tTab; g_cs.quality = (uintptr_t)&g_tQual; g_cs.rt0 = (uintptr_t)&g_tRt0; g_cs.cacheV = (uintptr_t)&g_tV;
     g_cs.streamerN = (uintptr_t)&g_tStreamN; g_cs.loading = (uintptr_t)&g_tLoad; g_cs.vehBudget = (uintptr_t)&g_tVeh;
     g_cs.pedBudget = (uintptr_t)&g_tPed; g_cs.gafm = (uintptr_t)g_tGafm;
+    // The row the game runs on: stock test bytes and no -nomemrestrict means the vendor rows, 550 at High.
+    g_tMemRestrictTest[0] = 0x83; g_tNoMemRestrict = 0; g_tMemRestrict = 0; g_cs.build = BUILD_1080;
+    { uint32_t a = (uint32_t)(uintptr_t)&g_tNoMemRestrict; memcpy(g_tMemRestrictTest + 2, &a, 4); }   // the operand as the loader relocates it
+    g_cs.memRestrictTest = (uintptr_t)g_tMemRestrictTest; g_cs.prmNoMemRestrict = (uintptr_t)&g_tNoMemRestrict; g_cs.prmMemRestrict = (uintptr_t)&g_tMemRestrict;
+    g_tSetView = 99; g_tSetDetail = 99; g_tSetCars = 50;
+    g_cs.setView = (uintptr_t)&g_tSetView; g_cs.setDetail = (uintptr_t)&g_tSetDetail; g_cs.setCars = (uintptr_t)&g_tSetCars;
     g_cs.playerInfo = (uintptr_t)g_tPlayerInfo; g_cs.playerPedOff = 0x58Cu; TPlayerInWorld(true);
-    g_sized = false; g_dxvk = dxvk; g_bootBudgetMb = bootMb; g_dxgiState = -1;   // no DXGI: the sizing uses the boot budget
+    g_playerVidmemMb = 0;
+    g_sized = false; g_worldLogged = false; g_rtMin = 0; g_settleX = -1; g_settleTicks = 0;
+    g_dxvk = dxvk; g_bootBudgetMb = bootMb; g_dxgiState = -1;   // no DXGI: the sizing uses the boot budget
     g_brakeOn = 0; g_brakeSt.t = 0; g_brakeSt.held = false; g_brakeCfg.floorMb = 800;
     g_car.on = g_ped.on = false;
     g_car.target = g_car.written = g_car.fromOther = g_ped.target = g_ped.written = g_ped.fromOther = 0;
-    // The budget is only raised behind the two pools and the queue fix; these cases are about the sizing itself, so
-    // they start from an install where all three went in. The case that they were refused is its own test below.
-    SiteSet(S_LINK_SIZE, ST_ON, ""); SiteSet(S_SLOT_SIZE, ST_ON, ""); g_fixInstalled = 1;
+    // The budget is only raised behind the two pools, the queue fix and the arena; these cases are about the sizing
+    // itself, so they start from an install where all four went in. That they were refused is its own test below.
+    SiteSet(S_LINK_SIZE, ST_ON, ""); SiteSet(S_SLOT_SIZE, ST_ON, ""); SiteSet(S_ARENA_SIZE, ST_ON, "");
+    SiteSet(S_VSTRUCT, ST_ON, ""); g_fixInstalled = g_linkFixInstalled = 1;
+    g_tPoolMode = 1; g_cs.poolMode = (uintptr_t)&g_tPoolMode;   // the game decided managed, which is the normal case
+    // The raises as they were left and the pool as the game built it from them: the read-back at sizing finds everything in place.
+    static const uint8_t vs[9] = { 0x6A, 100, 0x8B, 0xC8, 0xE8, 0xF7, 0x9A, 0xDA, 0xFF };
+    uint32_t sl = 32768, li = 65536, ar = 400u * 1024u;
+    g_tSzSlot[0] = 0x68; memcpy(g_tSzSlot + 1, &sl, 4); g_tSzLink[0] = 0x68; memcpy(g_tSzLink + 1, &li, 4); g_tSzArena[0] = 0xBF; memcpy(g_tSzArena + 1, &ar, 4);
+    memcpy(g_tSzVs, vs, 9); memset(g_tSzVsPoolObj, 0, sizeof(g_tSzVsPoolObj)); g_tSzVsPoolObj[2] = 100; g_tSzVsPool = (uint32_t)(uintptr_t)g_tSzVsPoolObj;
+    g_cs.slotSize = (uintptr_t)g_tSzSlot; g_cs.linkSize = (uintptr_t)g_tSzLink; g_cs.arenaSize = (uintptr_t)g_tSzArena;
+    g_cs.vstructSize = (uintptr_t)g_tSzVs; g_cs.vstructPool = (uintptr_t)&g_tSzVsPool;
+    g_raised[S_SLOT_SIZE] = 32768; g_raised[S_LINK_SIZE] = 65536; g_raised[S_ARENA_SIZE] = 400u * 1024u; g_raised[S_VSTRUCT] = 100;
+    g_dxvkVer[0] = g_dxvkVer[1] = g_dxvkVer[2] = -1; g_capNote[0] = 0; g_frameCap = 0; g_frameCapFrom[0] = 0; g_forcedInterval = -1; g_tRtss = 0;
+    g_worldMs = 0; g_worldFrame = 0; g_loadFps = -1; g_loadBuildS = 0; g_tFrame = 1000; g_cs.frameCounter = (uintptr_t)&g_tFrame;
+    g_ldUp = false; g_ldPending = true; g_ldEdgeMs = 0; g_ldX = -1; g_ldSteady = 0; g_ldVerdict = false; g_loadN = 0;   // as at the start: the next player is a load's edge
+    g_presentImmediate = 0; g_immediatePresents = 0;
+    g_slowLoadNote[0] = 0; g_slowLoadPending = 0; g_managedOn = true;
 }
 
 // ------------------------------------------------------------------ the Complete Edition's shapes
@@ -589,14 +634,15 @@ static void TNatCallCe(uint32_t cap) {
 
 // What the running game could use on its own at this texture quality: the smallest of the four rows it can reach,
 // worked out here from the test's own copy of the table rather than from the function under test.
-static int TStockFloor(int q) {
+static int TStockFloor(int q) {                     // the vendor rows 12 to 14: what the game runs on without FusionFix
     uint64_t lo = 0;
-    for (int row = 12; row <= 15; row++) { uint64_t v = kCtStockTable[3 * row + q]; if (!lo || v < lo) lo = v; }
+    for (int row = 12; row <= 14; row++) { uint64_t v = kCtStockTable[3 * row + q]; if (!lo || v < lo) lo = v; }
     return (int)(lo >> 20);
 }
+static int TRow15(int q) { return (int)(kCtStockTable[3 * 15 + q] >> 20); }   // what it runs on under FusionFix
 
 // The sizing waits for the render targets to settle: three ticks with the same X and no loading screen.
-static void TSizeSettle(int64_t ms0, int64_t lMb) { for (int i = 0; i < 3; i++) SisTick(ms0 + i * 1000, lMb); }
+static void TSizeSettle(int64_t ms0, int64_t lMb) { for (int i = 0; i < SETTLE_TICKS + 2; i++) SisTick(ms0 + i * 1000, lMb); }
 
 static void CoreTests() {
     // ---- the release-queue fix: a burst past the game's 65,536 is held and released, nothing lost or overwritten
@@ -727,6 +773,7 @@ static void CoreTests() {
         auto imm = [](const uint8_t* b) { uint32_t v; memcpy(&v, b + 1, 4); return v; };
         CHECK(RaisePools(c, 32768, 65536) && imm(g_tV1Slot) == 32768 && imm(g_tV1Link) == 65536 && g_tV1Slot[0] == 0x68 && g_tV1Link[0] == 0x68,
               "pools: slots 10,000 -> 32,768 and links 20,000 (FusionFix's) -> 65,536: %s / %s", g_site[S_SLOT_SIZE].note, g_site[S_LINK_SIZE].note);
+        CHECK(g_raised[S_SLOT_SIZE] == 32768 && g_raised[S_LINK_SIZE] == 65536, "pools: what each raise left is recorded for the read-back at sizing");
         uint32_t big = 100000; memcpy(g_tV1Link + 1, &big, 4);
         CHECK(RaisePools(c, 32768, 65536) && imm(g_tV1Link) == 100000, "pools: a larger size already there stands: %s", g_site[S_LINK_SIZE].note);
         memcpy(g_tV1Slot, slot0, 5); g_tV1SlotPool[8] = 0x1000;     // +0x20: the free list exists: the pool is built
@@ -751,16 +798,49 @@ static void CoreTests() {
         g_tV1VsPool = 0; g_tV1VsName[1] ^= 1;
         CHECK(!RaiseVehicleStruct(c, 100) && g_tV1VsSize[1] == 0x32 && g_site[S_VSTRUCT].state == ST_OFF_MISMATCH, "VehicleStruct: refused after another pool's name");
         g_tV1VsName[1] ^= 1;
-        // DXVK predicted from FusionFix's d3d9.cfg, for the arena
-        char tmp[MAX_PATH], sub[40]; GetTempPathA(MAX_PATH, tmp);        // one folder per process: harnesses run side by side
-        _snprintf_s(sub, sizeof(sub), _TRUNCATE, "sis_core_test_%lu", GetCurrentProcessId()); strcat_s(tmp, sub); CreateDirectoryA(tmp, NULL);
-        char cfg[MAX_PATH]; _snprintf_s(cfg, MAX_PATH, _TRUNCATE, "%s\\d3d9.cfg", tmp); DeleteFileA(cfg);
-        CHECK(PredictDxvk(tmp) == 0, "prediction: no d3d9.cfg: native Direct3D 9");
-        FILE* f = NULL; fopen_s(&f, cfg, "wb"); if (f) { fputs("[MAIN]\r\nAPI = 1\r\n", f); fclose(f); }
-        CHECK(PredictDxvk(tmp) == 1, "prediction: d3d9.cfg API = 1: DXVK");
-        f = NULL; fopen_s(&f, cfg, "wb"); if (f) { fputs("[MAIN]\r\nAPI = 0\r\n", f); fclose(f); }
-        CHECK(PredictDxvk(tmp) == 0, "prediction: d3d9.cfg API = 0: native");
-        DeleteFileA(cfg); RemoveDirectoryA(tmp);
+        // SISCO.ini. What matters is not the values but the defaults: a player with no file, a missing key or a
+        // typo must get exactly the behaviour of a player with no file at all, because that is everyone.
+        {
+            char tmp[MAX_PATH], sub[40]; GetTempPathA(MAX_PATH, tmp);      // one folder per process: harnesses run side by side
+            _snprintf_s(sub, sizeof(sub), _TRUNCATE, "sis_core_test_%lu", GetCurrentProcessId());
+            strcat_s(tmp, sub); CreateDirectoryA(tmp, NULL);
+            char p[MAX_PATH]; _snprintf_s(p, MAX_PATH, _TRUNCATE, "%s\\SISCO.ini", tmp); DeleteFileA(p);
+            SisSettings s = ReadSettings(p);
+            CHECK(s.enabled && s.fixes && s.limits && s.budget, "settings: no file at all: everything on");
+            FILE* f = NULL; fopen_s(&f, p, "wb"); if (f) { fputs("[SISCO]\r\nBudget=0\r\n", f); fclose(f); }
+            s = ReadSettings(p);
+            CHECK(s.enabled && s.fixes && s.limits && !s.budget, "settings: Budget=0 turns off only the budget");
+            f = NULL; fopen_s(&f, p, "wb"); if (f) { fputs("[SISCO]\r\nEnabled=0\r\n", f); fclose(f); }
+            s = ReadSettings(p);
+            CHECK(!s.enabled && !s.fixes && !s.limits && !s.budget, "settings: Enabled=0 takes the other three with it");
+            f = NULL; fopen_s(&f, p, "wb"); if (f) { fputs("[SISCO]\r\nBudget=banana\r\nLmits=0\r\n", f); fclose(f); }
+            s = ReadSettings(p);
+            CHECK(s.enabled && s.fixes && s.limits && s.budget, "settings: a bad value and a misspelt key both mean on");
+            f = NULL; fopen_s(&f, p, "wb"); if (f) { fputs("[SISCO]\r\nFixes=off\r\nBudget=no\r\nLimits=false\r\n", f); fclose(f); }
+            s = ReadSettings(p);
+            CHECK(s.enabled && s.fixes && s.limits && s.budget,
+                  "settings: off, no and false are not 0, so they leave everything on");
+            f = NULL; fopen_s(&f, p, "wb"); if (f) { fputs("[SISCO]\r\nBudget = 0 \r\n", f); fclose(f); }
+            s = ReadSettings(p);
+            CHECK(s.enabled && s.fixes && s.limits && !s.budget, "settings: spaces around a 0 still turn it off");
+            f = NULL; fopen_s(&f, p, "wb"); if (f) { fputs("[SISCO]\r\nBudget=0 ; while testing\r\n", f); fclose(f); }
+            s = ReadSettings(p);
+            CHECK(s.enabled && s.fixes && s.limits && !s.budget, "settings: a comment after the 0 still turns it off");
+            f = NULL; fopen_s(&f, p, "wb"); if (f) { fputs("nonsense, not an ini at all\r\n", f); fclose(f); }
+            s = ReadSettings(p);
+            CHECK(s.enabled && s.fixes && s.limits && s.budget, "settings: a file that is not an ini means on");
+            f = NULL; fopen_s(&f, p, "wb"); if (f) { fputs("[SISCO]\r\nFixes=0\r\n", f); fclose(f); }
+            s = ReadSettings(p);
+            CHECK(s.enabled && !s.fixes && s.limits && s.budget, "settings: Fixes=0 alone turns off only the fixes");
+            f = NULL; fopen_s(&f, p, "wb"); if (f) { fputs("[SISCO]\r\nLimits=0\r\n", f); fclose(f); }
+            s = ReadSettings(p);
+            CHECK(s.enabled && s.fixes && !s.limits && s.budget, "settings: Limits=0 alone turns off only the limits");
+            DeleteFileA(p); RemoveDirectoryA(tmp);
+        }
+
+        // The arena asks nothing now and is raised on every renderer, so there is no prediction left to test.
+        // That SisInstall still ATTEMPTS it is proved by the empty-sites case at the end of this file: a
+        // reintroduced condition would leave the site NOTTRIED or OFF_DISABLED there instead of OFF_ERROR.
     }
     // ---- Direct3DCreate9: the first call detects DXVK and sets the launch options only where the player set none
     {
@@ -791,6 +871,11 @@ static void CoreTests() {
         CoreSites keep = g_cs;
         g_cs.prmUnmanaged = c.prmUnmanaged; g_cs.prmManaged = c.prmManaged; g_cs.prmVidmem = c.prmVidmem;
         D3DCreate9_t create = (D3DCreate9_t)(uintptr_t)g_tIatSlot[0];
+        // The DXVK module the version is read from is, in this harness, the test binary itself, whose .rdata holds
+        // every marker spelt out below. So an image is planted for the whole block: DXVK 3.1.1 until (6) says otherwise.
+        static uint8_t tImg[96];
+        g_tDxvkImage = tImg; g_tDxvkImageN = sizeof(tImg);
+        memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v3.1.1", 7);
         // (1) DXVK, no option from the player: -managed, and -availablevidmem = the card's budget in MiB
         g_d3dCalls = 0; g_dxvk = -1; g_bootBudgetMb = -1; g_dxgiState = 0; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_tD3D.dxvk = 1; g_tD3D.refs = 1;
         void* r = create(32);
@@ -819,6 +904,113 @@ static void CoreTests() {
         else
             CHECK(g_dxvk == 1 && g_tPrm[1] && strstr(g_d3dNote, "vulkan-1.dll is loaded"), "Direct3D: no interop interface but vulkan-1.dll loaded: DXVK assumed: %s", g_d3dNote);
         g_tD3D.dxvk = 1;
+        // (5) DXVK's version is the standalone v<major>.<minor>[.<patch>] marker in its module, and nothing else.
+        {
+            int v[3]; uint8_t img[64];
+            auto plant = [&](const char* s) { memset(img, 0xAB, sizeof(img)); img[9] = 0; memcpy(img + 10, s, strlen(s) + 1); };
+            plant("v2.6.2");
+            CHECK(DxvkVersionIn(img, sizeof(img), v) && v[0] == 2 && v[1] == 6 && v[2] == 2, "DXVK version: v2.6.2 read as 2.6.2");
+            plant("v3.1");
+            CHECK(DxvkVersionIn(img, sizeof(img), v) && v[0] == 3 && v[1] == 1 && v[2] == 0, "DXVK version: v3.1 read as 3.1.0");
+            plant("v2.6.2-14-gabcdef0");
+            CHECK(DxvkVersionIn(img, sizeof(img), v) && v[0] == 2 && v[1] == 6 && v[2] == 2, "DXVK version: git describe's -14-g... suffix is read past: 2.6.2");
+            plant("v2.6.2+");
+            CHECK(DxvkVersionIn(img, sizeof(img), v) && v[0] == 2 && v[1] == 6 && v[2] == 2, "DXVK version: the dirty marker + is read past: 2.6.2");
+            plant("v3.1a");    bool a = DxvkVersionIn(img, sizeof(img), v);
+            plant("v31");      bool b = DxvkVersionIn(img, sizeof(img), v);
+            plant("v3.1.1.1"); bool d = DxvkVersionIn(img, sizeof(img), v);
+            memset(img, 0xAB, sizeof(img)); memcpy(img + 10, "v3.1.1", 7);   // no NUL before it: the tail of a longer string
+            bool e = DxvkVersionIn(img, sizeof(img), v);
+            memset(img, 0, sizeof(img)); bool f = DxvkVersionIn(img, sizeof(img), v);
+            CHECK(!a && !b && !d && !e && !f, "DXVK version: v3.1a, v31, four parts, the tail of a longer string and an empty image are all no version");
+        }
+        // (6) The version is logged, and gates nothing: 2.6.2 gets -managed like 3.1.1. No marker: logged as such.
+        memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v2.6.2", 7);
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0; g_frameCap = 0;
+        create(32);
+        CHECK(g_dxvk == 1 && g_dxvkVer[0] == 2 && g_dxvkVer[1] == 6 && g_dxvkVer[2] == 2 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && g_tPrm[2] != 0
+              && strstr(g_d3dNote, "DXVK 2.6.2") && strstr(g_d3dNote, "-managed set") && !g_capNote[0],
+              "Direct3D: DXVK 2.6.2: -managed set, the version in the line, no note: %s", g_d3dNote);
+        memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v3.1.1", 7);
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; strcpy_s(g_capNote, "stale from a capped run");
+        create(32);
+        CHECK(g_dxvkVer[0] == 3 && g_dxvkVer[2] == 1 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && strstr(g_d3dNote, "DXVK 3.1.1 (read from the planted image)") && !g_capNote[0],
+              "Direct3D: DXVK 3.1.1: -managed set, the version in the line, a stale note cleared: %s", g_d3dNote);
+        memset(tImg, 0xAB, sizeof(tImg));
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0;
+        create(32);
+        CHECK(g_dxvkVer[0] == -1 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && strstr(g_d3dNote, "version not found"),
+              "Direct3D: no version marker: logged, and -managed set: %s", g_d3dNote);
+        // (7) A visible frame cap, or a VSync forced in DXVK's config: -managed is NOT set and the note names it and
+        // its source; a player's own -managed under the cap is kept and the note still written.
+        memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v3.1.1", 7);
+        g_frameCap = 30; strcpy_s(g_frameCapFrom, "dxvk.conf");
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
+        create(32);
+        CHECK(g_tPrm[1] == 0 && g_tPrm[2] != 0 && strstr(g_d3dNote, "-managed NOT set under a visible cap") && strstr(g_d3dNote, "frame cap 30 fps (dxvk.conf)")
+              && strstr(g_capNote, "cap of 30 fps (dxvk.conf)"),
+              "Direct3D: a 30 fps cap in dxvk.conf: -managed not set, -availablevidmem still set, the note names the cap: %s", g_d3dNote);
+        g_frameCap = 60;
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
+        create(32);
+        CHECK(g_tPrm[1] == 0 && g_capNote[0], "Direct3D: a 60 fps cap holds too (30 s of build measured)");
+        g_frameCap = 144;
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
+        create(32);
+        CHECK(g_tPrm[1] == 0 && g_capNote[0] && strstr(g_d3dNote, "frame cap 144 fps"),
+              "Direct3D: any visible DXVK cap holds, an immediate present does not bypass DXVK's limiter: %s", g_d3dNote);
+        g_frameCap = 30;
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = 0; g_tPrm[1] = 0x4321; g_tPrm[2] = 0; g_capNote[0] = 0;
+        create(32);
+        CHECK(g_tPrm[1] == 0x4321 && strstr(g_d3dNote, "still stays the game's own") && g_capNote[0],
+              "Direct3D: the player's own -managed under a 30 fps cap: kept, and the note that holds the budget is written: %s", g_d3dNote);
+        g_frameCap = 0; g_frameCapFrom[0] = 0; g_forcedInterval = 1;
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
+        create(32);
+        CHECK(g_tPrm[1] == 0 && strstr(g_capNote, "d3d9.presentInterval 1") && strstr(g_d3dNote, "VSync forced in DXVK's config"),
+              "Direct3D: a VSync forced in DXVK's config holds like a cap, since it overrides the immediate present: %s", g_d3dNote);
+        g_forcedInterval = 0;
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
+        create(32);
+        CHECK(g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && !g_capNote[0], "Direct3D: a forced interval of 0 (immediate) holds nothing");
+        g_forcedInterval = -1;
+        // (8) Immediate presents while the world builds. With -managed in effect the first Direct3DCreate9 hooks
+        // CreateDevice on the object; the device it returns has its swap chain's Present hooked, and released as
+        // many times as taken; nothing goes out immediately until the worker raises the flag (its side is under
+        // "load" below), then every present carries FORCEIMMEDIATE on top of the game's own flags. The fake vtables
+        // sit in a read-only page for this, as DXVK's do, so the write has to lift the protection and put it back.
+        g_tD3DVtbl[16] = (void*)FakeCreateDevice; g_tSwapVtbl[3] = (void*)FakeSwapPresent;   // the writable fakes, as built: (6) hooked the first
+        void** roD3D = (void**)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        void** roDev = roD3D + 32; void** roSwap = roD3D + 64;
+        memcpy(roD3D, g_tD3DVtbl, sizeof(g_tD3DVtbl)); memcpy(roDev, g_tDevVtbl, sizeof(g_tDevVtbl)); memcpy(roSwap, g_tSwapVtbl, sizeof(g_tSwapVtbl));
+        DWORD roOld = 0; VirtualProtect(roD3D, 4096, PAGE_READONLY, &roOld);
+        g_tD3D.vtbl = roD3D; g_tDev.vtbl = roDev; g_tSwap.vtbl = roSwap;
+        g_d3dVtblHooked = NULL; g_swapVtblHooked = NULL; g_oCreateDevice = NULL; g_oSwapPresent = NULL; g_presentImmediate = 0; g_immediatePresents = 0; g_tSwapRefs = 0;
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0;
+        create(32);
+        CHECK(g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && g_d3dVtblHooked == roD3D && roD3D[16] == (void*)HkCreateDevice,
+              "present: with -managed set, CreateDevice is hooked on the object Direct3DCreate9 returned, through the page's protection");
+        MEMORY_BASIC_INFORMATION roMbi = {}; VirtualQuery(roD3D, &roMbi, sizeof(roMbi));
+        CHECK(roMbi.Protect == PAGE_READONLY, "present: the page is read-only again after the write (%08X)", (unsigned)roMbi.Protect);
+        void* dev = NULL;
+        ((CreateDevice_t)roD3D[16])(&g_tD3D, 0, 1, NULL, 0, NULL, &dev);
+        CHECK(dev == &g_tDev && g_tDevCreates == 1 && g_swapVtblHooked == roSwap && roSwap[3] == (void*)HkSwapPresent && g_presentImmediate == 0 && g_tSwapRefs == 0,
+              "present: the device came from the original, its swap chain's Present is hooked and released once, and nothing goes out immediately yet");
+        g_tSwapFlags = 0xFFFFFFFFu;
+        ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 1);                  // D3DPRESENT_DONOTWAIT, as a game may send it
+        CHECK(g_tSwapFlags == 1 && g_immediatePresents == 0, "present: before the player appears the present goes out as the game sent it (%08X)", (unsigned)g_tSwapFlags);
+        g_presentImmediate = 1;
+        ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 1);
+        CHECK(g_tSwapFlags == 0x101 && g_immediatePresents == 1, "present: while the world builds the present carries D3DPRESENT_FORCEIMMEDIATE (0x100) on top of the game's flags (%08X)", (unsigned)g_tSwapFlags);
+        g_presentImmediate = 0; g_immediatePresents = 0;
+        // A second Direct3DCreate9 hooks nothing again, and a second CreateDevice leaves the one hook as it is.
+        ((CreateDevice_t)roD3D[16])(&g_tD3D, 0, 1, NULL, 0, NULL, &dev);
+        CHECK(g_tDevCreates == 2 && roSwap[3] == (void*)HkSwapPresent && g_oSwapPresent == (SwapPresent_t)FakeSwapPresent && g_tSwapRefs == 0,
+              "present: a second device does not rehook the swap chain over itself, and releases what it took");
+        g_tD3D.vtbl = g_tD3DVtbl; g_tDev.vtbl = g_tDevVtbl; g_tSwap.vtbl = g_tSwapVtbl; VirtualFree(roD3D, 0, MEM_RELEASE);
+        g_d3dVtblHooked = NULL; g_swapVtblHooked = NULL; g_oCreateDevice = NULL; g_oSwapPresent = NULL;
+        g_tDxvkImage = NULL; g_tDxvkImageN = 0;
+        g_dxvkVer[0] = g_dxvkVer[1] = g_dxvkVer[2] = -1; g_capNote[0] = 0;
         g_tPrm[0] = 0; g_tPrm[1] = (uint32_t)(uintptr_t)g_flagArg; g_tPrm[2] = (uint32_t)(uintptr_t)g_vidmemArg;
         keep.prmUnmanaged = c.prmUnmanaged; keep.prmManaged = c.prmManaged; keep.prmVidmem = c.prmVidmem;
         g_cs = keep;
@@ -876,18 +1068,51 @@ static void CoreTests() {
         g_tLoad = 0; TPlayerInWorld(false); TSizeSettle(7000, 3000);
         CHECK(!g_sized, "world: nothing at the main menu, where the streamer is up and the loading screen down but there is no player");
         TPlayerInWorld(true);
-        g_tRt0 = 63ull << 20; SisTick(11000, 3000);
-        g_tRt0 = 468ull << 20; SisTick(12000, 3000);
-        g_tRt0 = 799ull << 20; SisTick(13000, 3000); SisTick(14000, 3000);
+        // The sliders are read at sizing and logged: the heavy install ran at 24 and 30 against 99 and 99 on the
+        // clean one, and no report compares without them.
+        g_tSetView = 24; g_tSetDetail = 30; g_tSetCars = 29;
+        // The first render-target stage can hold for a whole save load on a heavy install (23 s on GTAIV-dipo),
+        // longer than any number of steady ticks, so under 128 MB nothing is sized against it for 45 s.
+        g_tRt0 = 63ull << 20;
+        for (int i = 0; i < SETTLE_LONG_TICKS - 1; i++) SisTick(8000 + i * 1000, 3000);
+        CHECK(!g_sized, "world: a first stage under 128 MB is not sized against for 45 s, however steady");
+        // Below 1080p a FINISHED set is under 128 MB too (about 128 at 1366x768, 112 at 720p), and with a plain
+        // minimum those machines were never sized at all. Twice the smallest set seen this run is the finished set.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tRt0 = 12ull << 20; SisTick(8000, 3000); SisTick(9000, 3000);          // the first stage at 720p
+        g_tRt0 = 112ull << 20;
+        for (int i = 0; i < SETTLE_TICKS + 1; i++) SisTick(10000 + i * 1000, 3000);
+        CHECK(g_sized && g_sizedX == 112, "world: a finished 112 MB set at 720p, twice the first stage seen, is sized after the settle (%d)", g_sizedX);
+        // Seen only when already finished (a fast machine at 720p): sized once it has held for 45 s.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tRt0 = 112ull << 20;
+        for (int i = 0; i < SETTLE_LONG_TICKS; i++) SisTick(8000 + i * 1000, 3000);   // the first tick only records
+        CHECK(!g_sized, "world: a 112 MB set with nothing smaller seen waits");
+        SisTick(8000 + SETTLE_LONG_TICKS * 1000, 3000);
+        CHECK(g_sized && g_sizedX == 112, "world: and is sized once it has held for 45 s (%d)", g_sizedX);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TPlayerInWorld(true); g_tSetView = 24; g_tSetDetail = 30; g_tSetCars = 29;
+        g_tRt0 = 63ull << 20;
+        for (int i = 0; i < SETTLE_TICKS + 4; i++) SisTick(8000 + i * 1000, 3000);
+        CHECK(!g_sized, "world: back at the 4K first stage, still not sized against");
+        // The heavy install, as measured: the player appears with the render targets still at their first stage and
+        // they stay there for three seconds. Two steady ticks sized against 63 MB and slowed the rest of the load
+        // four times over. Nothing may be sized here.
+        int64_t tick = 11000;
+        g_tRt0 = 63ull << 20; for (int i = 0; i < 3; i++) { SisTick(tick, 3000); tick += 1000; }
+        CHECK(!g_sized, "world: nothing while the render targets sit at their first stage for three seconds (the heavy install)");
+        g_tRt0 = 468ull << 20; SisTick(tick, 3000); tick += 1000;
+        g_tRt0 = 799ull << 20; SisTick(tick, 3000); tick += 1000; SisTick(tick, 3000); tick += 1000;
         CHECK(!g_sized, "world: nothing while the render targets are still growing (63 -> 468 -> 799 MB, as in V1P)");
-        g_tRt0 = 468ull << 20; SisTick(15000, 3000);
+        g_tRt0 = 468ull << 20; SisTick(tick, 3000); tick += 1000;
         CHECK(!g_sized, "world: a change in the render targets starts the wait again");
-        SisTick(16000, 3000);
-        CHECK(!g_sized, "world: one steady tick after a change is not enough");
-        g_tRt0 = 799ull << 20; SisTick(17000, 3000); SisTick(18000, 3000); SisTick(19000, 3000);
+        for (int i = 0; i < SETTLE_TICKS - 2; i++) { SisTick(tick, 3000); tick += 1000; }
+        CHECK(!g_sized, "world: steady for less than SETTLE_TICKS after a change is not enough");
+        // The first tick at a new figure only records it, so holding for SETTLE_TICKS takes one tick more.
+        g_tRt0 = 799ull << 20; for (int i = 0; i < SETTLE_TICKS + 1; i++) { SisTick(tick, 3000); tick += 1000; }
         CHECK(g_sized && g_sizedX == 799 && TTabAll(4000) && g_sizedT == 4000 && g_brakeOn && g_brakeCfg.floorMb == TStockFloor(2),
-              "world: sized once they settled, at the full size (X %d): %s", g_sizedX, g_sizeNote);
+              "world: sized once they held for SETTLE_TICKS, at the full size (X %d): %s", g_sizedX, g_sizeNote);
         CHECK(g_tVeh == 200000000u && g_tPed == 200000000u && g_car.on && g_ped.on, "world: car and ped budgets 200 MB (%u, %u)", g_tVeh, g_tPed);
+        CHECK(g_setView == 24 && g_setDetail == 30 && g_setCars == 29, "display: the sliders were read at sizing (%u, %u, %u)", g_setView, g_setDetail, g_setCars);
         g_tPed = 250000000u; g_tVeh = 100000000u; SisTick(20000, 3000);
         CHECK(g_ped.target == 250000000u && g_tPed == 250000000u && g_tVeh == 200000000u && g_car.target == 200000000u,
               "guard: FusionFix's larger ped budget kept (%u), a smaller car budget replaced (%u)", g_tPed, g_tVeh);
@@ -928,7 +1153,7 @@ static void CoreTests() {
         TSizeReset(1, 6000, CAR_STOCK, PED_STOCK); g_tTab[47] = 4000ull << 20; TSizeSettle(1000, 3000);
         CHECK(TTabAll(4000) && strstr(g_sizeNote, "larger value already in the table"), "world: a larger value already in the table stands");
         TSizeReset(1, 23370, 250000000u, PED_STOCK); TSizeSettle(1000, 3000);
-        CHECK(g_tVeh == 250000000u && g_car.target == 250000000u && g_tPed == 200000000u && strstr(g_sizeNote, "from FusionFix kept"),
+        CHECK(g_tVeh == 250000000u && g_car.target == 250000000u && g_tPed == 200000000u && strstr(g_sizeNote, "another mod set kept"),
               "world: FusionFix's larger car budget, there before the world loaded, stands");
         // The value another mod set before the world loaded is its value, so the brake may not take it either. Before
         // this was recorded at sizing, the guard's floor was zero and a brake step cut it to the game's own.
@@ -940,6 +1165,160 @@ static void CoreTests() {
               "brake: at the floor, a car budget another mod set before the sizing still stands (%u MB, budget %d)",
               g_tVeh / 1000000, g_brakeSt.t);
 
+        // The moment the player stands in the world is logged once, before and apart from any sizing, so every
+        // log carries the load moment and shows the worker was looking even when nothing is ever sized.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TPlayerInWorld(false);
+        SisTick(1000, 3000); SisTick(2000, 3000);
+        CHECK(!g_worldLogged, "world line: not while the player is not in the world");
+        TPlayerInWorld(true); g_tRt0 = 63ull << 20;      // the first render-target stage: nothing is sized, but the player is there
+        SisTick(3000, 3000);
+        CHECK(g_worldLogged && !g_sized, "world line: written the first tick the player stands in the world, before any sizing");
+        g_tLoad = 1; g_worldLogged = false; SisTick(4000, 3000);
+        CHECK(!g_worldLogged, "world line: not while the loading screen is up");
+        g_tLoad = 0;
+
+        // What the game built is read back at sizing, because a raise SISCO made can be undone after it with
+        // nothing to see at the write: FusionFix sets the link pool to 20,000 and IVTweaker's MaxGameHeap the
+        // arena, each without looking, and IVTweaker's MaxVehicleStruct hooks the constructor call and passes its
+        // own count. Everything as left: the line names the four figures and the budget is raised.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT > TStockFloor(2) && strstr(g_builtNote, "drawable slots 32768, links 65536, arena 409600 KB, VehicleStruct pool 100"),
+              "built: read back as left, the budget raised: %s", g_builtNote);
+        // The link pool set back to 20,000 by a plugin that loaded after SISCO: marked, and the budget stays.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        { uint32_t li = 20000; memcpy(g_tSzLink + 1, &li, 4); }
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == TStockFloor(2) && g_site[S_LINK_SIZE].state == ST_OFF_MISMATCH && strstr(g_site[S_LINK_SIZE].note, "read back 20000")
+              && strstr(g_sizeNote, "the link pool was not raised"),
+              "built: the link pool read back at 20,000: the budget stays the game's own: %s", g_site[S_LINK_SIZE].note);
+        // The VehicleStruct pool built with 50 although the site says 100: the constructor call is hooked. Marked,
+        // the car budget held where 50 slots can use it, the budget itself untouched.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tSzVsPoolObj[2] = 50; g_tSzVs[4] = 0xE9;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT > TStockFloor(2) && g_site[S_VSTRUCT].state == ST_OFF_MISMATCH && strstr(g_site[S_VSTRUCT].note, "hooked")
+              && g_carHeld && g_tVeh == CAR_NO_POOL,
+              "built: VehicleStruct built with 50 behind a hooked constructor call: car held at %u MB: %s", g_tVeh / 1000000, g_site[S_VSTRUCT].note);
+        // Built with 120: another plugin raised it further, which stands.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tSzVsPoolObj[2] = 120;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_site[S_VSTRUCT].state == ST_ON && !g_carHeld && g_tVeh == 200000000u && strstr(g_builtNote, "VehicleStruct pool 120"),
+              "built: a pool built larger than SISCO asked stands: %s", g_builtNote);
+        // A frame cap: -managed was not set at Direct3DCreate9, the game runs its pool unmanaged, and the size line
+        // says why, naming the cap, instead of the generic unmanaged text.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        strcpy_s(g_capNote, "a frame-rate cap of 30 fps (dxvk.conf): planted"); g_tPoolMode = 0;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == TStockFloor(2) && strstr(g_sizeNote, "cap of 30 fps") && !strstr(g_sizeNote, "-nominimize"),
+              "built: under a frame cap the budget stays the game's own and the line names the cap: %s", g_sizeNote);
+        // The same with the pool MANAGED, which is what a player's own -managed under the cap leaves: still held.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        strcpy_s(g_capNote, "a frame-rate cap of 30 fps (dxvk.conf): planted"); g_tPoolMode = 1;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == TStockFloor(2) && memcmp(g_tTab, kCtStockTable, sizeof(g_tTab)) == 0 && strstr(g_sizeNote, "cap of 30 fps"),
+              "built: under a frame cap with the player's own -managed the budget still stays the game's own: %s", g_sizeNote);
+        g_capNote[0] = 0;
+        // The load line: the build is timed from the player appearing (the edge: the loading flag down, the player in
+        // the world) to the last change of the render targets, once they have held LOAD_STEADY_TICKS, and its frame
+        // rate comes from the game's counter over that span alone, not the settle after it.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tRt0 = 63ull << 20; g_tFrame = 1000; SisTick(1000, 3000);                      // the edge, at the first stage
+        CHECK(g_worldLogged && g_worldMs == 1000 && g_loadN == 1 && !g_ldVerdict, "load: the edge is the first tick the player stands in the world with the flag down");
+        g_tRt0 = 799ull << 20; g_tFrame = 1000 + 30 * 4; SisTick(5000, 3000);            // the last change 4 s later: 30 fps over the build
+        g_tFrame += 1000; SisTick(6000, 3000); SisTick(7000, 3000);                       // a thousand frames of settle, which must not count
+        CHECK(!g_ldVerdict, "load: no verdict until the targets have held %d ticks", LOAD_STEADY_TICKS);
+        SisTick(8000, 3000);
+        CHECK(g_ldVerdict && g_loadBuildS == 4 && g_loadFps == 30 && !g_slowLoadNote[0], "load: the world built in 4 s at 30 fps, the settle after it not counted (%lld s, %d fps)", g_loadBuildS, g_loadFps);
+        // Already final at the edge: a build of 0 s and no rate invented.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tRt0 = 799ull << 20; g_tFrame = 1000; SisTick(1000, 3000);
+        g_tFrame = 5000; for (int i = 2; i <= 4; i++) SisTick(i * 1000, 3000);
+        CHECK(g_ldVerdict && g_loadBuildS == 0 && g_loadFps == -1, "load: targets final at the edge: a 0 s build, no rate (%lld s, %d fps)", g_loadBuildS, g_loadFps);
+        // No frame counter (the Complete Edition): the duration alone.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_cs.frameCounter = 0;
+        g_tRt0 = 63ull << 20; SisTick(1000, 3000); g_tRt0 = 799ull << 20; SisTick(4000, 3000);
+        for (int i = 5; i <= 7; i++) SisTick(i * 1000, 3000);
+        CHECK(g_ldVerdict && g_loadBuildS == 3 && g_loadFps == -1, "load: without the counter the duration is timed and no rate is given (%lld s)", g_loadBuildS);
+        // A slow load is said and handed to the worker for the file: a build over LOAD_SLOW_S with -managed in effect.
+        // A first stage under 128 MB is not the build's end however long it holds (the heavy install held it 23 s), so
+        // the verdict waits for the stage after it.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tRt0 = 63ull << 20; g_tFrame = 1000; SisTick(1000, 3000);
+        for (int i = 2; i <= 21; i++) { g_tFrame += 8; SisTick(i * 1000, 3000); }        // the first stage holds 20 s at 8 fps
+        CHECK(!g_ldVerdict && g_presentImmediate == 0, "slowload: no verdict while the first stage holds (and nothing flagged without the hook)");
+        g_tRt0 = 799ull << 20; g_tFrame += 8; SisTick(22000, 3000);                        // the build ends 21 s after the edge
+        for (int i = 23; i <= 25; i++) SisTick(i * 1000, 3000);
+        CHECK(g_ldVerdict && g_loadBuildS == 21 && g_loadFps == 8 && strstr(g_slowLoadNote, "21 s to build") && strstr(g_slowLoadNote, "nothing SISCO can see") && g_slowLoadPending,
+              "slowload: a 21 s build at 8 fps is slow, nothing visible is named as such: %s", g_slowLoadNote);
+        // Exactly at the threshold: not slow.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tRt0 = 63ull << 20; SisTick(1000, 3000); g_tRt0 = 799ull << 20; SisTick(21000, 3000);
+        for (int i = 22; i <= 24; i++) SisTick(i * 1000, 3000);
+        CHECK(g_ldVerdict && g_loadBuildS == 20 && !g_slowLoadNote[0] && !g_slowLoadPending, "slowload: a 20 s build is not called slow (%lld s)", g_loadBuildS);
+        // What is named: DXVK's own cap, a forced VSync, RTSS, in that order of what SISCO can see.
+        auto slow22 = []() { g_tRt0 = 63ull << 20; SisTick(1000, 3000); g_tRt0 = 799ull << 20; SisTick(23000, 3000); for (int i = 24; i <= 26; i++) SisTick(i * 1000, 3000); };
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_frameCap = 30; strcpy_s(g_frameCapFrom, "dxvk.conf"); slow22();
+        CHECK(strstr(g_slowLoadNote, "DXVK's own frame cap of 30 fps (dxvk.conf)"), "slowload: a visible DXVK cap is named: %s", g_slowLoadNote);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_forcedInterval = 1; slow22();
+        CHECK(strstr(g_slowLoadNote, "d3d9.presentInterval 1"), "slowload: a VSync forced in DXVK's config is named: %s", g_slowLoadNote);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tRtss = 1; slow22();
+        CHECK(strstr(g_slowLoadNote, "RTSS is loaded"), "slowload: RTSS is named when it is loaded: %s", g_slowLoadNote);
+        // Without -managed there is nothing to say: the build is not paced by presents then.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_managedOn = false; slow22();
+        CHECK(g_ldVerdict && g_loadBuildS == 22 && !g_slowLoadNote[0] && !g_slowLoadPending, "slowload: nothing said without -managed in effect");
+        g_managedOn = true;
+        // The render targets never hold: the verdict comes at the ceiling and says so, and that is slow.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tRt0 = 63ull << 20; SisTick(1000, 3000);
+        for (int i = 2; i <= 91; i++) { g_tRt0 = (uint64_t)(100 + i) << 20; SisTick(i * 1000, 3000); }
+        CHECK(g_ldVerdict && g_loadBuildS == 90 && g_slowLoadPending, "slowload: targets that never hold: the verdict at the ceiling, and it is slow (%lld s)", g_loadBuildS);
+        // Every load is judged, not the first alone: a save switch (the flag up, then the player again) is timed again
+        // and a slow one is handed to the worker again.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tRt0 = 799ull << 20; SisTick(1000, 3000); for (int i = 2; i <= 4; i++) SisTick(i * 1000, 3000);
+        CHECK(g_ldVerdict && g_loadN == 1 && !g_slowLoadPending, "slowload: the first load, fast");
+        g_tLoad = 1; SisTick(20000, 3000); SisTick(21000, 3000);
+        g_tLoad = 0; g_tRt0 = 63ull << 20; SisTick(22000, 3000);
+        CHECK(g_loadN == 2 && g_worldMs == 22000 && !g_ldVerdict, "slowload: a save switch is a new load with its own edge");
+        g_tRt0 = 799ull << 20; SisTick(44000, 3000); for (int i = 45; i <= 47; i++) SisTick(i * 1000, 3000);
+        CHECK(g_ldVerdict && g_loadBuildS == 22 && g_slowLoadPending, "slowload: and a slow second load is said and handed to the worker (%lld s)", g_loadBuildS);
+        // The presents while the world builds, from the worker's side, with the hook in: up from the edge, held while
+        // the targets change and for at least 15 s, then handed back; a new load's flag drops it until its own edge.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_swapVtblHooked = g_tSwapVtbl;
+        g_tLoad = 1; TPlayerInWorld(false); SisTick(1000, 3000); SisTick(2000, 3000);
+        CHECK(g_presentImmediate == 0 && !g_worldLogged, "present: nothing while the loading flag is up");
+        g_tLoad = 0; SisTick(3000, 3000);
+        CHECK(g_presentImmediate == 0 && !g_worldLogged, "present: the flag dropped with no player (the main menu): still nothing");
+        TPlayerInWorld(true); g_tRt0 = 63ull << 20; SisTick(4000, 3000);
+        CHECK(g_presentImmediate == 1 && g_worldLogged && g_immediatePresents == 0, "present: the player appeared: presents go out immediately from this tick, the count reset");
+        g_tRt0 = 799ull << 20; SisTick(6000, 3000);
+        for (int i = 7; i <= 18; i++) SisTick(i * 1000, 3000);
+        CHECK(g_presentImmediate == 1 && g_ldVerdict, "present: the world built and judged, still held one tick before 15 s");
+        SisTick(19000, 3000);
+        CHECK(g_presentImmediate == 0 && g_ldEdgeMs == 0, "present: VSync handed back 15 s after the player appeared");
+        // A late stage: the targets change after 15 s, so the hold runs on until they have held 3 ticks.
+        g_tLoad = 1; SisTick(20000, 3000); g_tLoad = 0; g_tRt0 = 63ull << 20; SisTick(21000, 3000);
+        CHECK(g_presentImmediate == 1, "present: a save switch puts it up again at its own edge");
+        for (int i = 22; i <= 36; i++) SisTick(i * 1000, 3000);                              // the first stage holds 15 s
+        CHECK(g_presentImmediate == 1 && !g_ldVerdict, "present: 15 s up but the world not built: held");
+        g_tRt0 = 799ull << 20; SisTick(37000, 3000); SisTick(38000, 3000); SisTick(39000, 3000);
+        CHECK(g_presentImmediate == 1, "present: the targets changed at 16 s: held while they settle");
+        SisTick(40000, 3000);
+        CHECK(g_presentImmediate == 0 && g_ldVerdict && g_loadBuildS == 16, "present: handed back once they have held 3 ticks (a 16 s build: %lld s)", g_loadBuildS);
+        // A load's flag going up mid-hold drops the flag until the new edge.
+        g_tLoad = 1; SisTick(41000, 3000); g_tLoad = 0; g_tRt0 = 63ull << 20; SisTick(42000, 3000);
+        g_tLoad = 1; SisTick(43000, 3000);
+        CHECK(g_presentImmediate == 0 && g_ldEdgeMs == 0, "present: a new load's flag going up mid-build hands VSync back at once");
+        g_swapVtblHooked = NULL; g_tLoad = 0; g_presentImmediate = 0;
+
+        // The settle boundary itself: not one tick early, sized exactly at SETTLE_TICKS steady ticks.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        for (int i = 0; i < SETTLE_TICKS; i++) SisTick(1000 + i * 1000, 3000);   // the first tick only records
+        CHECK(!g_sized, "settle: not sized one tick before the settle");
+        SisTick(1000 + SETTLE_TICKS * 1000, 3000);
+        CHECK(g_sized, "settle: sized exactly at SETTLE_TICKS steady ticks");
+
         // The budget is only raised behind the pools and the queue fix that were raised to carry it.
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
         SiteSet(S_LINK_SIZE, ST_OFF_MISMATCH, "");
@@ -947,6 +1326,110 @@ static void CoreTests() {
         CHECK(g_sized && memcmp(g_tTab, kCtStockTable, sizeof(g_tTab)) == 0 && g_sizedT == TStockFloor(2) && strstr(g_sizeNote, "the link pool was not raised"),
               "world: the table is left exactly as the game had it when the link pool was not raised: %s", g_sizeNote);
         SiteSet(S_LINK_SIZE, ST_ON, "");
+
+        // The lock fix is the other half of surviving a pool that runs dry: raised pools keep the game away
+        // from the edge, the recursive lock is what saves it at the edge. Both, or the budget stays.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_linkFixInstalled = 0;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && memcmp(g_tTab, kCtStockTable, sizeof(g_tTab)) == 0 && g_sizedT == TStockFloor(2)
+              && strstr(g_sizeNote, "the link-pool lock fix is not in"),
+              "world: the budget stays the game's own when the link-pool lock fix did not go in: %s", g_sizeNote);
+        g_linkFixInstalled = 1;
+
+        // The same for the arena. It is raised on every renderer now, but it can still be refused: the site may not
+        // match, or the plugin may have loaded after the game already built it. Either way a raised budget would be
+        // loading through the game's 160 MiB, which is what empties the world, so the budget stays where it is.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        SiteSet(S_ARENA_SIZE, ST_OFF_ERROR, "too late: the game already built it");
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && memcmp(g_tTab, kCtStockTable, sizeof(g_tTab)) == 0 && g_sizedT == TStockFloor(2) && !g_brakeOn
+              && strstr(g_sizeNote, "the streaming arena was not raised"),
+              "world: DXVK proven but the arena left at the game's 160 MiB: the budget stays the game's own: %s", g_sizeNote);
+        SiteSet(S_ARENA_SIZE, ST_ON, "");
+
+        // The budget row the game runs on. Under FusionFix the branch to row 15 is forced (its ExtraStreamingMemory
+        // off, which is every FusionFix install), and the game runs at 800, not the 550 SISCO's floor once assumed:
+        // the brake was measured stepping to 664, 644 and 550 on such installs, below what the game itself would
+        // have used. The floor now asks the game's own question, both ways it can be answered.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tMemRestrictTest[0] = 0xE9;                         // FusionFix's forced branch: the test's first byte is a jump
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedTStock == TRow15(2) && g_brakeCfg.floorMb == TRow15(2) && TRow15(2) == 800,
+              "floor: the row-15 branch forced: the game's own is %d and the brake cannot go below it", g_sizedTStock);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tNoMemRestrict = 1;                                 // the player's own -nomemrestrict: the same row
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedTStock == TRow15(2), "floor: the player's own -nomemrestrict: %d", g_sizedTStock);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedTStock == TStockFloor(2) && TStockFloor(2) == 550,
+              "floor: stock test and no option: the vendor rows, %d", g_sizedTStock);
+        // FusionFix rewrites the test on every install; with ExtraStreamingMemory on it hooks the credit function too
+        // and the game runs the vendor rows, ignoring even a player's own -nomemrestrict.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tMemRestrictTest[0] = 0xE9; g_tGafm[0] = 0xE9; TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedTStock == TStockFloor(2), "floor: FusionFix with ExtraStreamingMemory on: the vendor rows, %d", g_sizedTStock);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tMemRestrictTest[0] = 0xE9; g_tGafm[0] = 0xE9; g_tNoMemRestrict = 1; TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedTStock == TStockFloor(2), "floor: and the player's own -nomemrestrict is ignored there, %d", g_sizedTStock);
+        // The stock test carries the slot's address as the loader relocated it, so the file's own operand (0x10AAB78,
+        // where the mock cannot be) reads as a rewritten test: the compare uses the rebased slot, as it must.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); { uint32_t fa = 0x10AAB78u; memcpy(g_tMemRestrictTest + 2, &fa, 4); } TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedTStock == TRow15(2), "floor: the file's own operand is not the stock test in a relocated image, %d", g_sizedTStock);
+        // The Complete Edition's stock test has the same shape with its own jump distance (0x162): recognised on its
+        // build alone, and 1.0.8.0's distance reads as rewritten there.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_cs.build = BUILD_CE; memcpy(g_tSzVs + 4, kVsCtorCallCe, 5); g_tMemRestrictTest[9] = 0x62; TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedTStock == TStockFloor(2), "floor: the Complete Edition's stock test is recognised by its own distance, %d", g_sizedTStock);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_cs.build = BUILD_CE; memcpy(g_tSzVs + 4, kVsCtorCallCe, 5); g_tMemRestrictTest[9] = 0x58; TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedTStock == TRow15(2), "floor: 1.0.8.0's distance on the Complete Edition reads as rewritten (FusionFix), row 15: %d", g_sizedTStock);
+        g_tMemRestrictTest[9] = 0x58;
+        // A player's own -memrestrict N: the game never reads the table then, so it is left alone and the line says why.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tMemRestrict = 1; TSizeSettle(1000, 3000);
+        CHECK(g_sized && memcmp(g_tTab, kCtStockTable, sizeof(g_tTab)) == 0 && strstr(g_sizeNote, "-memrestrict"),
+              "floor: the player's own -memrestrict: the table is not read, so it is left: %s", g_sizeNote);
+
+        // SISCO writes the -managed launch option and used to assume it took. The game tests -nominimize AFTER
+        // -managed and that one wins, so a player with it runs unmanaged while the log says -managed set. Run D
+        // measured DXVK without managed resources collapsing the address space at a budget of 1400, well under the
+        // 4000 asked for here, so the raise is refused instead.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tPoolMode = 0;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && memcmp(g_tTab, kCtStockTable, sizeof(g_tTab)) == 0 && g_sizedT == TStockFloor(2)
+              && strstr(g_sizeNote, "not using Direct3D managed resources"),
+              "world: the game decided unmanaged: the budget stays the game's own: %s", g_sizeNote);
+
+        // But only a confident 0 counts. The game writes 0 or 1 there and nothing else, so anything else means
+        // SISCO is not reading what it thinks it is, and a wrong address must not cost every player their budget.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_cs.poolMode = 0x10;                                 // not readable at all, not a readable odd value
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == T_MAX_MB && !strstr(g_sizeNote, "managed resources"),
+              "world: an unreadable pool mode leaves the decision alone: %d MB", g_sizedT);
+        g_cs.poolMode = (uintptr_t)&g_tPoolMode; g_tPoolMode = 1;
+
+        // The car budget is only worth raising as far as there are slots for the models it pays for.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        SiteSet(S_VSTRUCT, ST_OFF_MISMATCH, "site bytes differ");
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == T_MAX_MB && g_tVeh == CAR_NO_POOL && g_tPed == CARPED_FULL
+              && strstr(g_sizeNote, "VehicleStruct pool can use it"),
+              "world: the VehicleStruct raise was refused: car held at %u MB, ped still %u MB", g_tVeh / 1000000, g_tPed / 1000000);
+        SiteSet(S_VSTRUCT, ST_ON, "");
+
+        // A player's own -availablevidmem is what the game believes it has, so it bounds the budget however big
+        // the card is. Without this the budget was written past what the game could reach, and the traffic
+        // budgets took their share of a pool that size.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_playerVidmemMb = 2048;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT < 2048 && g_sizedT > TStockFloor(2) && strstr(g_sizeNote, "your own -availablevidmem"),
+              "world: a 24 GB card with the player's own -availablevidmem 2048: budget %d MB", g_sizedT);
+
+        // A figure larger than the card changes nothing, because the card is still the smaller of the two.
+        TSizeReset(1, 3895, CAR_STOCK, PED_STOCK);
+        g_playerVidmemMb = 8192;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && !strstr(g_sizeNote, "your own -availablevidmem"),
+              "world: an -availablevidmem above the card's own figure is not a bound: %d MB", g_sizedT);
 
         TSizeReset(1, 3895, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
         CHECK(g_sizedT >= 1650 && g_sizedT <= 1665 && g_tVeh == CarPedFor(CAR_STOCK, g_sizedT, TStockFloor(2)) && g_tPed == CarPedFor(PED_STOCK, g_sizedT, TStockFloor(2))
@@ -1066,13 +1549,57 @@ static void CoreTests() {
         g_cs = dc;
         g_d3dCalls = 0; g_dxvk = -1; g_bootBudgetMb = 23370; g_dxgiState = -1;
         g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_tD3D.dxvk = 1; g_tD3D.refs = 1;
+        static uint8_t ceImg[96]; memset(ceImg, 0xAB, sizeof(ceImg)); ceImg[19] = 0; memcpy(ceImg + 20, "v3.1.1", 7);   // not the test binary's own .rdata
+        g_tDxvkImage = ceImg; g_tDxvkImageN = sizeof(ceImg);
         ((D3DCreate9_t)(uintptr_t)g_tIatSlot[0])(32);
+        g_tDxvkImage = NULL; g_tDxvkImageN = 0;
         CHECK(g_tPrm[2] == 0 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && strstr(g_d3dNote, "left to the Complete Edition"),
               "CE Direct3D: -managed set, -availablevidmem left to the game's own figure: %s", g_d3dNote);
         // Everything this case touched goes back: the cases after it read the Direct3D state this one overwrote.
         g_cs = keepCs; g_dxvk = keepDxvk; g_dxgiState = keepState; g_bootBudgetMb = keepBoot; g_d3dCalls = keepCalls;
         memcpy(g_d3dNote, keepNote, sizeof(g_d3dNote));
         g_tPrm[0] = keepPrm[0]; g_tPrm[1] = keepPrm[1]; g_tPrm[2] = keepPrm[2];
+        g_tD3DVtbl[16] = (void*)FakeCreateDevice; g_d3dVtblHooked = NULL; g_oCreateDevice = NULL;   // this create() hooked the writable fake
+        g_managedOn = false; g_dxvkVer[0] = g_dxvkVer[1] = g_dxvkVer[2] = -1;
+    }
+    // ---- DXVK's config, parsed as DXVK 3.1 parses it: the keys its D3D9 reads, the exe's own section, a later line
+    // wins, and the DXVK_CONFIG variable's ';' lines over the file
+    {
+        DxvkConf dc;
+        auto fresh = [&]() { dc.d3d9Cap = dc.dxvkCap = dc.interval = CONF_UNSET; dc.d3d9CapFrom = dc.dxvkCapFrom = dc.intervalFrom = ""; };
+        const char* t1 = "# a comment\r\nd3d9.maxFrameRate = 60\r\n  d3d9.presentInterval=\"1\"   # trailing\r\ndxgi.maxFrameRate = 30\r\n";
+        fresh(); DxvkConfParse(t1, strlen(t1), '\n', "GTAIV.exe", "dxvk.conf", &dc);
+        CHECK(dc.d3d9Cap == 60 && dc.interval == 1 && dc.dxvkCap == CONF_UNSET && strcmp(dc.d3d9CapFrom, "dxvk.conf") == 0,
+              "dxvkconf: the two keys read, quotes and comments ignored, dxgi.maxFrameRate not a D3D9 key (%d, %d)", dc.d3d9Cap, dc.interval);
+        const char* t2 = "d3d9.maxFrameRate = 60\n[GTAIV.exe]\nd3d9.maxFrameRate = 30\n[EFLC.exe]\nd3d9.maxFrameRate = 20\nd3d9.presentInterval = 1\n";
+        fresh(); DxvkConfParse(t2, strlen(t2), '\n', "GTAIV.exe", "dxvk.conf", &dc);
+        CHECK(dc.d3d9Cap == 30 && dc.interval == CONF_UNSET, "dxvkconf: the exe's own section wins over the global line, another exe's section is skipped (%d)", dc.d3d9Cap);
+        fresh(); DxvkConfParse(t2, strlen(t2), '\n', "gtaiv.exe", "dxvk.conf", &dc);
+        CHECK(dc.d3d9Cap == 60, "dxvkconf: the section name is matched exactly, as DXVK matches it (%d)", dc.d3d9Cap);
+        const char* t3 = "dxvk.maxFrameRate = -1\nd3d9.maxFrameRate = 60\nd3d9.maxFrameRate = abc\nd3d9.presentInterval = +1\n";
+        fresh(); DxvkConfParse(t3, strlen(t3), '\n', "GTAIV.exe", "dxvk.conf", &dc);
+        CHECK(dc.dxvkCap == -1 && dc.d3d9Cap == CONF_UNSET && dc.interval == CONF_UNSET,
+              "dxvkconf: a negative value is read; a later value that is not DXVK's integer unsets the key, as DXVK then falls back (%d, %d, %d)", dc.dxvkCap, dc.d3d9Cap, dc.interval);
+        const char* t4 = "d3d9.maxFrameRate=144;d3d9.presentInterval = 2";
+        DxvkConfParse(t4, strlen(t4), ';', "GTAIV.exe", "DXVK_CONFIG", &dc);
+        CHECK(dc.d3d9Cap == 144 && dc.interval == 2 && strcmp(dc.d3d9CapFrom, "DXVK_CONFIG") == 0, "dxvkconf: the variable's lines apply over the file's (%d, %d)", dc.d3d9Cap, dc.interval);
+        const char* t5 = "[GTAIV.exe\nd3d9.maxFrameRate = 30\n";
+        fresh(); DxvkConfParse(t5, strlen(t5), '\n', "GTAIV.exe", "dxvk.conf", &dc);
+        CHECK(dc.d3d9Cap == CONF_UNSET, "dxvkconf: a section line with no closing bracket names nothing, as in DXVK, so the lines after it are off");
+        fresh(); DxvkConfParse("", 0, '\n', "GTAIV.exe", "dxvk.conf", &dc);
+        CHECK(dc.d3d9Cap == CONF_UNSET && dc.interval == CONF_UNSET, "dxvkconf: nothing from nothing");
+    }
+    // ---- the frame counter is read only while the add that advances it is where SISCO expects it, its operand rebased
+    {
+        static uint32_t ctr; static uint8_t inc[7] = { 0x83, 0x05, 0, 0, 0, 0, 0x01 };
+        uint32_t a = (uint32_t)(uintptr_t)&ctr; memcpy(inc + 2, &a, 4);
+        CoreSites c = {}; c.frameCounter = (uintptr_t)&ctr; c.frameInc = (uintptr_t)inc;
+        PinFrameCounter(c);
+        CHECK(c.frameCounter == (uintptr_t)&ctr, "frame: the counter is kept when the add that advances it reads it");
+        inc[6] = 0x02; PinFrameCounter(c);
+        CHECK(c.frameCounter == 0, "frame: and dropped when the instruction differs");
+        inc[6] = 0x01; c.frameCounter = (uintptr_t)&ctr; c.frameInc = 0; PinFrameCounter(c);
+        CHECK(c.frameCounter == 0, "frame: and dropped where the build has no add to check (the Complete Edition)");
     }
     // ---- the engine-sound slots: read and never written, and an install someone else raised is told apart from stock
     {
@@ -1108,9 +1635,28 @@ static void CoreTests() {
         static Site sSites[S_COUNT]; memcpy(sSites, g_site, sizeof(sSites)); CoreSites sCs = g_cs;
         CoreSites z = {};
         SitesShape1080(z);
-        SisLoadResult lr = SisInstall(z, false);
-        CHECK(!lr.queue && !lr.lock && !lr.race && !lr.arena && g_site[S_ARENA_SIZE].state == ST_OFF_DISABLED && !lr.params && !lr.d3d
-              && g_site[S_D3D_IAT].state == ST_OFF_MISMATCH, "install: the arena left alone for native, no Direct3D hook without its readers, nothing on empty sites");
+        // Each group of the settings file is honoured, and anything not tried stays NOTTRIED rather than
+        // pretending to have been refused.
+        g_set.limits = g_set.fixes = false;
+        memset(g_site, 0, sizeof(g_site));       // ST_NOTTRIED, so what this call does not touch stays visible
+        SisInstall(z);
+        CHECK(g_site[S_ARENA_SIZE].state == ST_NOTTRIED && g_site[S_SLOT_SIZE].state == ST_NOTTRIED
+              && g_site[S_VSTRUCT].state == ST_NOTTRIED && g_site[S_PUSH].state == ST_NOTTRIED,
+              "install: Fixes=0 and Limits=0 leave every site untouched");
+        // Each alone: the other group is still tried (on empty sites it is refused, which is not NOTTRIED).
+        g_set.limits = false; g_set.fixes = true; memset(g_site, 0, sizeof(g_site)); SisInstall(z);
+        CHECK(g_site[S_ARENA_SIZE].state == ST_NOTTRIED && g_site[S_SLOT_SIZE].state == ST_NOTTRIED && g_site[S_VSTRUCT].state == ST_NOTTRIED
+              && g_site[S_PUSH].state != ST_NOTTRIED, "install: Limits=0 alone leaves the raises untouched and still tries the fixes");
+        g_set.limits = true; g_set.fixes = false; memset(g_site, 0, sizeof(g_site)); SisInstall(z);
+        CHECK(g_site[S_PUSH].state == ST_NOTTRIED && g_site[S_LINK_TAKE1].state == ST_NOTTRIED && g_site[S_ARENA_SIZE].state != ST_NOTTRIED,
+              "install: Fixes=0 alone leaves the fixes untouched and still tries the raises");
+        g_set.limits = g_set.fixes = true;
+        memcpy(g_site, sSites, sizeof(sSites));
+
+        SisLoadResult lr = SisInstall(z);
+        CHECK(!lr.queue && !lr.lock && !lr.race && !lr.arena && g_site[S_ARENA_SIZE].state == ST_OFF_ERROR && !lr.params && !lr.d3d
+              && g_site[S_D3D_IAT].state == ST_OFF_MISMATCH,
+              "install: the arena is always attempted, no Direct3D hook without its readers, nothing on empty sites");
         g_oDrain = sOD; g_cacheAddr = sCA; g_fixInstalled = sFI; g_linkFixInstalled = sLF; memcpy(g_site, sSites, sizeof(sSites)); g_cs = sCs;
     }
 }
