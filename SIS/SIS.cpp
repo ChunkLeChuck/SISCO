@@ -105,6 +105,8 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     else _snprintf_s(sw, sizeof(sw), _TRUNCATE, "OFF: %s%s%s", g_set.fixes ? "" : "Fixes ",
                      g_set.limits ? "" : "Limits ", g_set.budget ? "" : "Budget ");
     SisLog("settings", "%s (%s)", sw, haveIni ? "SISCO.ini" : "no SISCO.ini, so the defaults");
+    if (IsWine()) SisLog("platform", "%s: Proton on the Steam Deck reads like this; the budget is asked for up to %d MB here, the brake follows the memory layout, and the size and brake lines record it",
+                         g_wineNote, WINE_BUDGET_MAX_MB);
     if (!g_set.enabled) {
         SisLog("sis", "SISCO changes nothing this run. Set Enabled=1 in SISCO.ini to turn it back on.");
         return TRUE;

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.2 (2026-09-24)
+
+- Steam Deck and Proton: SISCO now knows it is running under Wine. Proton loads its own DXVK ahead of the game
+  folder's vulkan.dll, and the log says so instead of asking for 3.x. The 32-bit address space is laid out
+  differently there, and 1.0.1's brake read it as nearly full a second after sizing, taking the budget back to the
+  game's own with the car and ped budgets. Now the layout is measured at sizing: where its largest free block is under
+  1 GB the budget is raised to at most 2000 MB, a desktop Linux machine whose layout reads like Windows is sized as
+  Windows is, the brake's lines follow the layout either way, and the log's `size` and `brake` lines record it.
+- Render targets under 24 MB are never sized against. On a Deck the first build stage is 5 MB and held past the
+  45-second settle on a slow load, so 1.0.1 sized the budget in the middle of the load and judged the build finished.
+  No playable resolution has a finished set that small.
+- The slow-load note names the Deck's own frame limit, MangoHud's and the driver's as the usual causes under Wine.
+
 ## 1.0.1 (2026-09-24)
 
 **The download**

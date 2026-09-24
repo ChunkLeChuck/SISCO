@@ -33,7 +33,7 @@
 #ifndef SISCO_BUILD
 #define SISCO_BUILD "dev"
 #endif
-#define SIS_VERSION "1.0.1"
+#define SIS_VERSION "1.0.2"
 
 // ---------------------------------------------------------------------------------------------
 // Addresses (1.0.8.0 VA, image base 0x400000), rebased at run time. SITE lines are checked against GTAIV.exe on disk
@@ -924,6 +924,44 @@ static SisSettings ReadSettings(const char* iniPath) {
 }
 
 static int g_dxvk = -1;                  // -1 not known yet, 0 native Direct3D 9, 1 DXVK
+// Wine, and so Proton and the Steam Deck: its ntdll exports wine_get_version, which no Windows has. Asked once. What
+// differs there, measured on one Deck (GE-Proton 10-25, the Complete Edition): the 32-bit address space is fragmented
+// from the start, a largest free block of 269 MB right after a load with 101 MB of video memory held, where Windows
+// shows a few GB; and Proton loads its own DXVK as d3d9.dll ahead of the game folder's vulkan.dll.
+static int g_wine = -1;                  // -1 not asked yet, 0 Windows, 1 Wine
+static char g_wineNote[96] = "";         // "Wine 10.0 (Linux 6.11)", for the log
+#ifdef SISCO_TEST
+static int g_tWine = -1;                 // the harness's answer, -1 = ask the process
+#endif
+static bool IsWine() {
+#ifdef SISCO_TEST
+    if (g_tWine >= 0) { if (g_tWine && !g_wineNote[0]) strcpy_s(g_wineNote, "Wine (planted)"); return g_tWine == 1; }
+#endif
+    if (g_wine >= 0) return g_wine == 1;
+    typedef const char* (__cdecl* WineVer_t)(void);
+    typedef void (__cdecl* WineHost_t)(const char** sys, const char** rel);
+    HMODULE nt = GetModuleHandleA("ntdll.dll");
+    WineVer_t ver = nt ? (WineVer_t)GetProcAddress(nt, "wine_get_version") : NULL;
+    if (!ver) { g_wine = 0; return false; }
+    const char* v = NULL; const char* sys = NULL; const char* rel = NULL;
+    __try {
+        v = ver();
+        WineHost_t host = (WineHost_t)GetProcAddress(nt, "wine_get_host_version");
+        if (host) host(&sys, &rel);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    _snprintf_s(g_wineNote, sizeof(g_wineNote), _TRUNCATE, "Wine %s (%s %s)", v ? v : "?", sys ? sys : "?", rel ? rel : "");
+    g_wine = 1;
+    return true;
+}
+// The most SISCO asks for on Wine in this version: half of the Windows ceiling, above which even Windows needs the
+// brake, on a layout that starts fragmented; a Deck at 1280x800 asks its streamer for far less than a 4K machine
+// does. The brake decides under it from the layout it measures (BrakeWineLines), and every Deck log carries the
+// figures the next version's rule will be built from.
+#define WINE_BUDGET_MAX_MB 2000
+// The ceiling is for a layout that starts fragmented, the one measured. A desktop Linux machine whose largest free
+// block at sizing is at least this (Windows shows a few GB) is sized as Windows is; the brake still follows what it
+// measured (BrakeWineLines lowers its lines only for a small block).
+#define WINE_ROOMY_MB 1024
 static int64_t g_bootBudgetMb = -1;      // the card's budget when the game created Direct3D
 static char g_vidmemArg[16];
 static int g_playerVidmemMb;             // the player's own -availablevidmem, 0 if they set none
@@ -1101,8 +1139,11 @@ static void SisOnFirstD3D(void* d3d) {
     char ver[320] = "";
     if (g_dxvk == 1) {
         if (g_dxvkVer[0] >= 0) _snprintf_s(ver, sizeof(ver), _TRUNCATE, "; DXVK %d.%d.%d (read from %s)%s", g_dxvkVer[0], g_dxvkVer[1], g_dxvkVer[2], g_dxvkVerFrom,
-                                           g_dxvkVer[0] < 3 ? "; SISCO is tested on 3.x, the vulkan.dll in the download" : "");
+                                           g_dxvkVer[0] >= 3 ? "" : IsWine() ? "; SISCO is tested on 3.x (Proton chose this version; the download's vulkan.dll is not used there)"
+                                                                            : "; SISCO is tested on 3.x, the vulkan.dll in the download");
         else strcpy_s(ver, "; DXVK version not found in any module");
+        if (IsWine()) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; %s%s", g_wineNote,
+                                  strcmp(g_dxvkVerFrom, "d3d9.dll") == 0 ? " (DXVK loaded as d3d9.dll: on Proton that is Proton's own, ahead of the game folder's vulkan.dll)" : "");
         if (g_frameCap > 0) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; frame cap %d fps (%s)", g_frameCap, g_frameCapFrom);
         if (g_forcedInterval >= 1) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; VSync forced in DXVK's config (d3d9.presentInterval %d)", g_forcedInterval);
         if (RtssLoaded()) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; RTSS is loaded (its cap cannot be read: a frame limit makes loads slow with -managed)");
@@ -1370,6 +1411,10 @@ static int64_t g_settleX = -1; static int g_settleTicks;   // the render targets
 // the heavy install). A finished set is 252 MB at 1080p (a player's log), which scales to about 128 at 1366x768
 // and 112 at 720p, figures no run here has measured: with the plain minimum those machines were never sized at all.
 #define SETTLE_LONG_TICKS 45
+// And a set under 24 MB is never a finished one, however long it holds: a finished set is about 120 MB per megapixel
+// (796 at 4K, 252 at 1080p), so 37 MB at 640x480 is the smallest any playable resolution makes, while the first build
+// stage is 5 MB at 1280x800 (a Steam Deck, where it held for over 45 s on a slow load and was sized against).
+#define RT_FINISHED_MIN_MB 24
 static int64_t g_rtMin;       // the smallest render-target set seen this run, in MB; 0 until one is seen
 
 // The brake, proven in the field without a texture pack, which is the hard case. Without a pack, a large
@@ -1412,6 +1457,7 @@ static int BrakeDecide(BrakeState& st, int64_t nowMs, int64_t vMb, int64_t xMb, 
 }
 static int g_brakeOn;
 static BrakeCfg g_brakeCfg = { 512, 32, 128, 192, 20, 800 };
+static const char* AddrSpaceNote(char* out, size_t cap);   // below, with the address-space walk: the brake lines carry the layout on Wine
 static BrakeState g_brakeSt;
 // All 48 cells, aligned 32-bit stores of the low dword (8v: safe from any thread; the high dword is 0 for every value
 // under 4 GiB and stays so).
@@ -1424,8 +1470,18 @@ static bool WriteBudgetAll(uintptr_t table, int mb) {
 }
 static void BrakeStart(int tMb, int floorMb) {
     g_brakeCfg.floorMb = floorMb < tMb ? floorMb : tMb;
+    g_brakeCfg.holdMb = 512; g_brakeCfg.emergencyMb = 128;       // the Windows lines, measured (BRAKEN2)
     g_brakeSt.t = tMb; g_brakeSt.held = false; g_brakeSt.refL = -1; g_brakeSt.lastActMs = 0;
     g_brakeOn = 1;
+}
+// On Wine the largest free block is small from the start (269 MB on a Deck with nothing loaded), so the Windows
+// lines would hold at the first tick, which is what happened to that Deck. There the lines follow the block measured
+// at sizing: a hold at half of it, an emergency at a quarter, never above the Windows figures. A guess until a Deck
+// has measured a fall; the layout on every brake line is what will replace it.
+static void BrakeWineLines(int64_t lAtSizingMb) {
+    if (lAtSizingMb <= 0) return;
+    if (lAtSizingMb / 2 < g_brakeCfg.holdMb) g_brakeCfg.holdMb = (int)(lAtSizingMb / 2);
+    if (lAtSizingMb / 4 < g_brakeCfg.emergencyMb) g_brakeCfg.emergencyMb = (int)(lAtSizingMb / 4);
 }
 
 // The car and ped budgets as SISCO keeps them: the target, and what it last wrote (anything else there was written by
@@ -1472,23 +1528,46 @@ static void BrakeTick(uintptr_t table, int64_t nowMs, int64_t vMb, int64_t xMb, 
     int act = BRAKE_NONE, t = BrakeDecide(g_brakeSt, nowMs, vMb, xMb, lMb, g_brakeCfg, &act);
     if (act == BRAKE_NONE) return;
     if (!WriteBudgetAll(table, t)) { g_brakeSt = before; return; }   // not written: as if this tick never happened
-    SisLog("brake", "%s at %lld s: budget %d -> %d MB (video memory held %lld MB, largest free block %lld MB)",
-           act == BRAKE_HOLD ? "held" : act == BRAKE_STEP ? "stepped" : "EMERGENCY step", nowMs / 1000, before.t, t, vMb, lMb);
+    char as[120];
+    SisLog("brake", "%s at %lld s: budget %d -> %d MB (video memory held %lld MB, largest free block %lld MB%s)",
+           act == BRAKE_HOLD ? "held" : act == BRAKE_STEP ? "stepped" : "EMERGENCY step", nowMs / 1000, before.t, t, vMb, lMb, AddrSpaceNote(as, sizeof(as)));
     TrafficFollow(t, g_sizedTStock);
 }
 
-// The largest free block of the address space (the brake's L), from the tool's own thread.
-static uint64_t LargestFreeBlock() {
-    uint64_t largest = 0;
+// The free address space, from the tool's own thread: the largest block (the brake's L), the total, and how many
+// blocks of at least 1 MB it lies in. Windows shows a few large blocks; Wine shows many small ones, which is why the
+// total and the count are logged there.
+struct AddrSpace { uint64_t largest, total; int blocks; };
+#ifdef SISCO_TEST
+static AddrSpace g_tAddrSpace;           // planted by the harness when its largest is not 0
+#endif
+static AddrSpace AddressSpace() {
+    AddrSpace a = { 0, 0, 0 };
+#ifdef SISCO_TEST
+    if (g_tAddrSpace.largest) return g_tAddrSpace;
+#endif
     uintptr_t p = 0x10000;
     MEMORY_BASIC_INFORMATION m;
     while (p < 0xFFFF0000u && VirtualQuery((void*)p, &m, sizeof(m)) == sizeof(m)) {
-        if (m.State == MEM_FREE && m.RegionSize > largest) largest = m.RegionSize;
+        if (m.State == MEM_FREE) {
+            if (m.RegionSize > a.largest) a.largest = m.RegionSize;
+            a.total += m.RegionSize;
+            if (m.RegionSize >= (1u << 20)) a.blocks++;
+        }
         uintptr_t next = (uintptr_t)m.BaseAddress + m.RegionSize;
         if (next <= p) break;
         p = next;
     }
-    return largest;
+    return a;
+}
+static uint64_t LargestFreeBlock() { return AddressSpace().largest; }
+// On Wine the layout is logged beside every figure that depends on it.
+static const char* AddrSpaceNote(char* out, size_t cap) {
+    out[0] = 0;
+    if (!IsWine()) return out;
+    AddrSpace a = AddressSpace();
+    _snprintf_s(out, cap, _TRUNCATE, "; address space %llu MB free in %d blocks, the largest %llu MB", a.total >> 20, a.blocks, a.largest >> 20);
+    return out;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1605,6 +1684,9 @@ static void SisSize(int64_t xMb) {
     uint32_t mrSlot = 0; RdU32(g_cs.prmMemRestrict, &mrSlot);
     int tVram = 0;
     int t = bMb > 0 ? SizeBudget(bMb, xMb, tStock, g_extraStreaming, &tVram) : tStock;
+    AddrSpace wineAs = IsWine() ? AddressSpace() : AddrSpace{ 0, 0, 0 };
+    bool wineCap = IsWine() && (int64_t)(wineAs.largest >> 20) < WINE_ROOMY_MB && t > WINE_BUDGET_MAX_MB;
+    if (wineCap) t = WINE_BUDGET_MAX_MB;
     uint64_t cell = 0; RdU64(g_cs.table + 8 * (45 + q), &cell);
     int cellMb = (int)(cell >> 20);
     bool keptCell = cellMb > t && cellMb <= T_MAX_MB;
@@ -1648,19 +1730,21 @@ static void SisSize(int64_t xMb) {
         TrafficSet(g_car, car > wantCar ? car : wantCar);
         TrafficSet(g_ped, ped > wantPed ? ped : wantPed);
     }
-    if (wrote) BrakeStart(t, tStock);
+    char as[120]; AddrSpaceNote(as, sizeof(as));
+    if (wrote) { BrakeStart(t, tStock); if (IsWine()) BrakeWineLines((int64_t)(wineAs.largest >> 20)); }
     char held[320] = "";
     if (needs) _snprintf_s(held, sizeof(held), _TRUNCATE, ", LEFT AT THE GAME'S OWN: %s", needs);
     else if (!wrote) strcpy_s(held, " NOT WRITTEN");
     _snprintf_s(g_sizeNote, sizeof(g_sizeNote), _TRUNCATE,
                 "DXVK%s; card budget %lld MB%s, render targets %lld MB, others %d MB%s: budget %d MB (the card allows %d, the game's "
-                "own %d%s)%s; car %u MB, ped %u MB%s%s", saw, bMb, vmNote, xMb, OtherMb(xMb),
+                "own %d%s%s)%s; car %u MB, ped %u MB%s%s%s", saw, bMb, vmNote, xMb, OtherMb(xMb),
                 g_extraStreaming ? ", FusionFix's ExtraStreamingMemory assumed (the credit function is hooked)" : "", t, tVram,
-                tStock, keptCell ? "; a larger value already in the table kept" : "", held,
+                tStock, wineCap ? "; 2000 is the most SISCO asks for on Wine with a layout this fragmented, in this version" : "",
+                keptCell ? "; a larger value already in the table kept" : "", held,
                 g_car.target / 1000000, g_ped.target / 1000000,
                 lowRam ? " (the game's low-memory values kept)"
                        : g_carHeld ? " (car held where the game's own VehicleStruct pool can use it)" : "",
-                car > CarPedFor(CAR_STOCK, t, tStock) || ped > CarPedFor(PED_STOCK, t, tStock) ? " (a larger value another mod set kept)" : "");
+                car > CarPedFor(CAR_STOCK, t, tStock) || ped > CarPedFor(PED_STOCK, t, tStock) ? " (a larger value another mod set kept)" : "", as);
     SisLog("size", "%s", g_sizeNote);
 }
 // The render targets grew (the player raised the resolution): lower the budget to what the card allows now. Never raised.
@@ -1698,6 +1782,8 @@ static void LoadVerdict(int64_t nowMs, bool ceiling) {
     if (g_frameCap > 0) _snprintf_s(seen, sizeof(seen), _TRUNCATE, "DXVK's own frame cap of %d fps (%s)", g_frameCap, g_frameCapFrom);
     else if (g_forcedInterval >= 1) _snprintf_s(seen, sizeof(seen), _TRUNCATE, "VSync forced in DXVK's config (d3d9.presentInterval %d), which SISCO cannot present past", g_forcedInterval);
     else if (RtssLoaded()) strcpy_s(seen, "RTSS is loaded, and a frame limit set there is the likeliest cause");
+    else if (IsWine()) strcpy_s(seen, "nothing SISCO can see: on a Steam Deck its own frame limit (the Quick Access menu) is the usual one; "
+                        "on a desktop, MangoHud's limiter or the driver's; otherwise a limiter outside the game");
     else strcpy_s(seen, "nothing SISCO can see: the driver's control panel (a Max Frame Rate for GTAIV.exe) or a limiter that hooks the game; "
                         "if no limit is set anywhere, this machine renders the world that slowly and this note is a false alarm");
     _snprintf_s(g_slowLoadNote, sizeof(g_slowLoadNote), _TRUNCATE,
@@ -1738,7 +1824,7 @@ static void LoadTick(int64_t nowMs, bool loadingUp, bool playerIn, bool ready, i
     // A set under 128 MB that is not twice the smallest seen is a part-built stage that can hold for a whole build
     // (the sizing's rule, at SETTLE_LONG_TICKS above): the build is not over until it has held that long.
     bool partBuilt = x < 128 && x < 2 * g_rtMin;
-    bool built = x >= 0 && g_ldSteady >= LOAD_STEADY_TICKS && (!partBuilt || g_ldSteady >= SETTLE_LONG_TICKS);
+    bool built = x >= RT_FINISHED_MIN_MB && g_ldSteady >= LOAD_STEADY_TICKS && (!partBuilt || g_ldSteady >= SETTLE_LONG_TICKS);
     bool ceiling = nowMs >= g_ldEdgeMs + LOAD_CEILING_MS;
     if (!g_ldVerdict && (built || ceiling)) { g_ldVerdict = true; LoadVerdict(nowMs, ceiling && !built); }
     if (g_ldVerdict && nowMs >= g_ldEdgeMs + LOAD_HOLD_MS) {
@@ -1766,7 +1852,7 @@ static void SisTick(int64_t nowMs, int64_t lMb) {
         // Under 128 MB the render targets are still their first build stage (63 MB at 4K, 28 at 1080p; finished
         // sets are 765 and 252), and on a heavy install that stage can hold for the whole save load, longer than
         // any number of steady ticks. Never size against it.
-        if (!ready || loadingUp || !playerIn) { g_settleX = -1; g_settleTicks = 0; return; }
+        if (!ready || loadingUp || !playerIn || xMb < RT_FINISHED_MIN_MB) { g_settleX = -1; g_settleTicks = 0; return; }
         if (g_rtMin <= 0 || xMb < g_rtMin) g_rtMin = xMb;
         if (xMb != g_settleX) { g_settleX = xMb; g_settleTicks = 0; return; }
         if (++g_settleTicks < SETTLE_TICKS) return;

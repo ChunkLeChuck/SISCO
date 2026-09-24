@@ -125,6 +125,13 @@ the city thins slightly instead of the game falling over.
   credit when sizing; that combination has not been measured.
 - **DXVK**: required. The `vulkan.dll` in the download is 3.1.1, the version SISCO is tested against; the log
   records the version it found, and a frame cap or a forced VSync in DXVK's own `dxvk.conf` holds the budget (see above).
+- **Proton and the Steam Deck**: supported. Proton loads its own DXVK ahead of the game folder's `vulkan.dll`, so the
+  download's DXVK is not used there and the log says which version ran. The 32-bit address space can be laid out
+  differently under Wine (a Deck showed a largest free block of 269 MB with nothing loaded): where the largest free
+  block at sizing is under 1 GB, SISCO asks for at most 2000 MB in this version; a desktop Linux machine whose layout
+  reads like Windows is sized as Windows is. Either way the brake follows the layout it measures at sizing, and the
+  `size` and `brake` lines record it. The Deck's own frame limit, MangoHud's and the driver's are frame caps during
+  loads: lift them while loading, or set `Budget=0`.
 - **Anything that sets the same values**: a larger value another mod already set always stands. SISCO only raises.
   A mod that sets a value back after SISCO loaded is seen at sizing, when SISCO reads every raised value back from
   the game: for the pools and the arena that raise then counts as refused and the budget stays the game's own; for

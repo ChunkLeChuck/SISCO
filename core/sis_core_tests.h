@@ -380,6 +380,7 @@ static void TSizeReset(int dxvk, int64_t bootMb, uint32_t veh, uint32_t ped) {
     g_cs.vstructSize = (uintptr_t)g_tSzVs; g_cs.vstructPool = (uintptr_t)&g_tSzVsPool;
     g_raised[S_SLOT_SIZE] = 32768; g_raised[S_LINK_SIZE] = 65536; g_raised[S_ARENA_SIZE] = 400u * 1024u; g_raised[S_VSTRUCT] = 100;
     g_dxvkVer[0] = g_dxvkVer[1] = g_dxvkVer[2] = -1; g_capNote[0] = 0; g_frameCap = 0; g_frameCapFrom[0] = 0; g_forcedInterval = -1; g_tRtss = 0;
+    g_tWine = 0; g_wineNote[0] = 0; g_tAddrSpace.largest = g_tAddrSpace.total = 0; g_tAddrSpace.blocks = 0;
     g_worldMs = 0; g_worldFrame = 0; g_loadFps = -1; g_loadBuildS = 0; g_tFrame = 1000; g_cs.frameCounter = (uintptr_t)&g_tFrame;
     g_ldUp = false; g_ldPending = true; g_ldEdgeMs = 0; g_ldX = -1; g_ldSteady = 0; g_ldVerdict = false; g_loadN = 0;   // as at the start: the next player is a load's edge
     g_presentImmediate = 0; g_immediatePresents = 0;
@@ -974,6 +975,17 @@ static void CoreTests() {
         create(32);
         CHECK(g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && !g_capNote[0], "Direct3D: a forced interval of 0 (immediate) holds nothing");
         g_forcedInterval = -1;
+        // Wine (Proton, the Steam Deck): -managed is set as on Windows, the line names Wine, and a 2.x loaded as
+        // d3d9.dll is named as Proton's choice rather than as the download's.
+        g_tWine = 1; g_wineNote[0] = 0;
+        memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v2.7.1", 7);
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
+        create(32);
+        CHECK(g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && g_managedOn && !g_capNote[0] && strstr(g_d3dNote, "Wine (planted)")
+              && strstr(g_d3dNote, "Proton chose this version"),
+              "Direct3D: on Wine -managed is set as usual, and a 2.x is named as Proton's choice, not the download's: %s", g_d3dNote);
+        g_tWine = 0; g_wineNote[0] = 0;
+        memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v3.1.1", 7);
         // (8) Immediate presents while the world builds. With -managed in effect the first Direct3DCreate9 hooks
         // CreateDevice on the object; the device it returns has its swap chain's Present hooked, and released as
         // many times as taken; nothing goes out immediately until the worker raises the flag (its side is under
@@ -1312,6 +1324,38 @@ static void CoreTests() {
         CHECK(g_presentImmediate == 0 && g_ldEdgeMs == 0, "present: a new load's flag going up mid-build hands VSync back at once");
         g_swapVtblHooked = NULL; g_tLoad = 0; g_presentImmediate = 0;
 
+        // A render-target set under 24 MB is never a finished one, however long it holds (the Deck's first stage is 5 MB
+        // and held past 45 s): not sized against, no verdict; the finished set after it is sized as usual.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_tRt0 = 5ull << 20; SisTick(1000, 3000);
+        for (int i = 2; i <= 60; i++) SisTick(i * 1000, 3000);
+        CHECK(!g_sized && !g_ldVerdict && g_rtMin == 5, "floor: 5 MB of render targets held 60 s: not sized, no verdict, and recorded as the smallest set (so 110 is finished by the 2x rule)");
+        g_tRt0 = 110ull << 20;
+        for (int i = 61; i <= 60 + SETTLE_TICKS + 1; i++) SisTick(i * 1000, 3000);
+        CHECK(g_sized && g_sizedX == 110 && g_ldVerdict && g_loadBuildS == 60, "floor: the 110 MB set after it is sized after the settle, and the build timed to it (%d, %lld s)", g_sizedX, g_loadBuildS);
+        // Wine: the sizing's answer is capped at 2000, the brake's lines follow the largest free block at sizing, the
+        // layout is on the size line; a larger value another mod put in the table still stands above the cap.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tWine = 1;
+        g_tAddrSpace.largest = 269ull << 20; g_tAddrSpace.total = 1400ull << 20; g_tAddrSpace.blocks = 17;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == WINE_BUDGET_MAX_MB && TTabAll(WINE_BUDGET_MAX_MB) && g_brakeOn && g_brakeCfg.holdMb == 134 && g_brakeCfg.emergencyMb == 67
+              && strstr(g_sizeNote, "2000 is the most SISCO asks for on Wine with a layout this fragmented") && strstr(g_sizeNote, "address space 1400 MB free in 17 blocks, the largest 269 MB"),
+              "wine: 4000 becomes 2000, the brake holds at 134 and panics at 67, the layout is logged: %s", g_sizeNote);
+        BrakeCfg wc = g_brakeCfg; BrakeState ws = { 2000, false, -1, 0 }; int wa = -1;
+        CHECK(BrakeDecide(ws, 1000, 300, 110, 269, wc, &wa) == 2000 && wa == BRAKE_NONE, "wine: the Deck's 269 MB at sizing is not a hold there");
+        CHECK(BrakeDecide(ws, 2000, 300, 110, 130, wc, &wa) == TStockFloor(2) && wa == BRAKE_HOLD, "wine: a fall to half of it is, to the floor (%d)", ws.t);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tAddrSpace.largest = 269ull << 20; g_tAddrSpace.total = 1400ull << 20; g_tAddrSpace.blocks = 17; g_tTab[47] = 3000ull << 20; TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == 3000, "wine: another mod's 3000 in the table stands above the cap (%d)", g_sizedT);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tAddrSpace.largest = 2500ull << 20; g_tAddrSpace.total = 2600ull << 20; g_tAddrSpace.blocks = 2;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == 4000 && g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 128 && !strstr(g_sizeNote, "most SISCO asks") && strstr(g_sizeNote, "the largest 2500 MB"),
+              "wine: a desktop Linux layout with a 2500 MB block is sized as Windows is, with the Windows lines, and logged (%d): %s", g_sizedT, g_sizeNote);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tAddrSpace.largest = 1023ull << 20; g_tAddrSpace.total = 2000ull << 20; g_tAddrSpace.blocks = 5;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == WINE_BUDGET_MAX_MB && g_brakeCfg.holdMb == 511, "wine: one MB under the roomy line is still capped, with the lines from the block (%d, hold %d)", g_sizedT, g_brakeCfg.holdMb);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == 4000 && g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 128 && !strstr(g_sizeNote, "address space") && !strstr(g_sizeNote, "on Wine"),
+              "wine: on Windows nothing of this applies: 4000, the measured lines, no layout on the line");
         // The settle boundary itself: not one tick early, sized exactly at SETTLE_TICKS steady ticks.
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
         for (int i = 0; i < SETTLE_TICKS; i++) SisTick(1000 + i * 1000, 3000);   // the first tick only records
@@ -1588,6 +1632,24 @@ static void CoreTests() {
         CHECK(dc.d3d9Cap == CONF_UNSET, "dxvkconf: a section line with no closing bracket names nothing, as in DXVK, so the lines after it are off");
         fresh(); DxvkConfParse("", 0, '\n', "GTAIV.exe", "dxvk.conf", &dc);
         CHECK(dc.d3d9Cap == CONF_UNSET && dc.interval == CONF_UNSET, "dxvkconf: nothing from nothing");
+    }
+    // ---- Wine is asked of the process once (this one is Windows), and the address-space walk answers with real figures
+    {
+        g_tWine = -1; g_wine = -1;
+        CHECK(!IsWine() && g_wine == 0, "wine: this process is Windows, and the answer is cached");
+        g_tWine = 0;
+        g_tAddrSpace.largest = 0;
+        AddrSpace a = AddressSpace();
+        CHECK(a.largest >= (64u << 20) && a.total >= a.largest && a.blocks >= 1 && LargestFreeBlock() == a.largest,
+              "wine: the walk finds the free space of this process (largest %llu MB, %llu MB in %d blocks)", a.largest >> 20, a.total >> 20, a.blocks);
+        char n[120]; AddrSpaceNote(n, sizeof(n));
+        CHECK(!n[0], "wine: no layout note on Windows");
+        g_tWine = 1; AddrSpaceNote(n, sizeof(n)); g_tWine = 0;
+        CHECK(strstr(n, "; address space ") && strstr(n, "the largest"), "wine: and one on Wine: %s", n);
+        g_brakeCfg.holdMb = 512; g_brakeCfg.emergencyMb = 128; BrakeWineLines(2000);
+        CHECK(g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 128, "wine: a large block at sizing leaves the Windows lines");
+        BrakeWineLines(0);
+        CHECK(g_brakeCfg.holdMb == 512, "wine: no block measured leaves them too");
     }
     // ---- the frame counter is read only while the add that advances it is where SISCO expects it, its operand rebased
     {
