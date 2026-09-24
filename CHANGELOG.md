@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.0.3 (2026-09-24)
+
+- Engine sounds: 48 engine-sound slots instead of the game's 15. Each different car engine near you needs one, a car
+  keeps it until the car is gone, and past the last one a car plays no engine sound, which the raised car budget made
+  easy to reach. This is revd's fix, built in without its extras: the audio heap grows by exactly what the slots need
+  (152 MiB instead of 126, where revd uses 192), SISCO writes its own `pc\audio\config\waveslots_sisco.xml` from the
+  game's file (FusionFix's `update` copy when it is there) and points the game at it, and no game file is edited. If
+  revd or another audio mod already changed the slots, SISCO leaves them to it.
+- The ped budget is 180 MB instead of 200. The other 20 MB goes to the world: car and ped models are paid from the
+  same streaming budget.
+- The address-space brake's last-resort line is 192 MB again, as it was designed and tested: with less free address
+  space than that, it lowers the budget every 10 seconds. 1.0.2 lowered the line to 128 MB by mistake.
+- A game started while an earlier one was still closing (an error box or a crash dialog still open) ran without
+  SISCO and said nothing. Each game now gets its own.
+- FusionFix installed in `scripts\` is found too, so an audio mod in its `update` folder keeps its slots; and a line or
+  a slot commented out in `driverSettings.xml` or a slot file is ignored, as the game ignores it.
+- To uninstall, delete `pc\audio\config\waveslots_sisco.xml` as well as `SISCO.asi` and `SISCO.ini`.
+- Loading is fast with VSync and frame limiters on. Under `-managed`, which the raised budget needs, the game's
+  loading waited on every present, so VSync or any frame cap made it crawl. SISCO now skips most presents while a
+  loading screen is up and while the world builds after it (one still goes through every 33 ms on a loading screen,
+  every 100 ms while the world builds). Measured with VSync on: 82 seconds from launch to the world built before,
+  10 now; under a 30 fps cap: 90 before, 17 now.
+- A frame cap no longer keeps the budget at the game's own. 1.0.1 and 1.0.2 held it under a cap they could see.
+- SISCO no longer forces presents out without VSync (1.0.1 and 1.0.2 did while loading): that could stall a loading
+  screen whose window was not in the foreground until it was clicked.
+- SISCO-SLOW-LOAD.txt is no longer written, and one left by 1.0.1 or 1.0.2 is deleted: its advice was to lift a
+  frame limiter, which no longer slows loading. SISCO no longer reads dxvk.conf either, and the load line no longer
+  gives a frame rate.
+- The download extracts correctly on Linux and the Steam Deck: the zip stored its folders with backslashes, which some
+  Linux tools turn into a file name instead of the plugins folder.
+- The log says when each loading screen went up and how long it was up before the player appeared. The size line
+  says the pool is managed.
+
 ## 1.0.2 (2026-09-24)
 
 - Steam Deck and Proton: SISCO now knows it is running under Wine. Proton loads its own DXVK ahead of the game

@@ -4,11 +4,12 @@ Reads the "// SITE" lines and the #define blocks of the source and verifies, in 
   entry  <va> <bytes>     the prologue bytes the entry hook steals
   call   <va> -> <tgt>    an E8 rel32 whose target is tgt
   icall  <va> -> [<iat>]  FF 15 <iat>
-  slot   <va> == <val>    a dword holding val
   bytes  <va> <bytes>     literal bytes
   import <va> <name>      an import slot whose hint/name entry names that function
 plus: every SITE address has its #define, the build identity constants match, every D_ address lies in
-.data, and no build anchor sits where a detour could land on it.
+.data, no build anchor sits where a detour could land on it, every reference in kEngineRefs1080 /
+kEngineRefsCe carries its expected bytes, and a scan of every dword in the file finds no reference into the
+engine-sound table that the list lacks.
 Usage: python sisco_sites_check.py <GTAIV.exe> [source ...]
 """
 import os
@@ -75,10 +76,6 @@ for kind, name, va, rest in sites:
         rva = pe.read_u32(va - ib)
         got = pe.read(rva + 2, len(rest) + 1)
         res(got == rest.encode() + b"\0", f"{name}: import slot 0x{va:X} names {rest}")
-    elif kind == "slot":
-        val = int(rest.split("==")[1].strip(), 16)
-        got = pe.read_u32(va - ib)
-        res(got == val, f"{name}: dword at 0x{va:X} = 0x{got:X} (want 0x{val:X})")
     else:
         res(False, f"{name}: unknown kind {kind}")
 
@@ -112,6 +109,32 @@ for aname, ava in anchors:
     res(not clash, f"{aname} at 0x{ava:X} is clear of every site a detour could land on ({clash or 'clear'})")
 if IS_CE:      # 1.0.8.0 is named by its RESC10 string and its arena vtable instead, neither of which anything hooks
     res(len(anchors) >= 2, f"the Complete Edition declares {len(anchors)} build anchors (two, in different functions)")
+
+# The engine-sound slot table's references (kEngineRefs1080 / kEngineRefsCe in the source): each entry is the instruction
+# the file holds (its opcode bytes, then the table plus the entry's field), and together they are every dword in the whole
+# file that points into the table, so none is missed when the table moves.
+arr = re.search(r"static const AudioRef %s\[(\d+)\] = \{(.*?)\};" % ("kEngineRefsCe" if IS_CE else "kEngineRefs1080"), text, re.S)
+tbl = defines.get("D_AUDIO_TABLE")
+res(arr is not None and tbl is not None, "the engine-sound slot table and its reference list are in the source")
+if arr is not None and tbl is not None:
+    ents = re.findall(r"\{ 0x([0-9A-Fa-f]+)u, \{ 0x([0-9A-Fa-f]{2}), 0x([0-9A-Fa-f]{2}) \}, (\d), (\d+) \}", arr.group(2))
+    res(len(ents) == int(arr.group(1)), f"engine refs: {len(ents)} entries parsed, the array says {arr.group(1)}")
+    listed = set()
+    for at, p0, p1, pn, fld in ents:
+        at, pn, fld = int(at, 16), int(pn), int(fld)
+        listed.add(at)
+        pre = bytes([int(p0, 16), int(p1, 16)])[:pn]
+        got = pe.read(at - pn - ib, pn)
+        disp = pe.read_u32(at - ib)
+        res(got == pre and disp == tbl + fld, f"engine ref 0x{at:X}: {(got or b'').hex(' ').upper()} +0x{disp:X} (want {pre.hex(' ').upper()} +0x{tbl + fld:X})")
+    found = set()
+    for sec in pe.sections:
+        blob = pe.data[sec["rawptr"]:sec["rawptr"] + sec["rawsize"]]
+        for i in range(len(blob) - 3):
+            v = struct.unpack_from("<I", blob, i)[0]
+            if tbl <= v < tbl + 25 * 16:
+                found.add(ib + sec["vaddr"] + i)
+    res(found == listed, f"every dword in the file pointing into the table is listed ({len(found)} found, unlisted {sorted(hex(x) for x in found - listed)})")
 
 # data addresses live in .data (their contents are runtime state, so only the section is checkable)
 for k, v in sorted(defines.items()):

@@ -6,12 +6,12 @@
 // card, raises the car and ped budgets for more variety, and keeps the address space safe while you play.
 //
 // Everything that does the work is in core/sis_core.h. This file loads it, writes a short log next to the .asi
-// (plugins\SISCO.log) and ticks it once a second. Nothing to set up: no launch option, no ini.
+// (plugins\SISCO.log) and ticks it once a second. Nothing to set up: no launch option to add, and SISCO.ini beside it
+// has four switches, all on by default.
 #include "../core/sis_core.h"
 
 static HANDLE g_log = INVALID_HANDLE_VALUE;
 static CRITICAL_SECTION g_logCs;
-static char g_slowFile[MAX_PATH] = "";   // plugins\SISCO-SLOW-LOAD.txt: written once per slow load, removed at start
 
 static void SisLog(const char* key, const char* fmt, ...) {
     if (g_log == INVALID_HANDLE_VALUE) return;
@@ -35,32 +35,10 @@ static const char* SiteText(int s, char* buf, size_t cap) {
     return buf;
 }
 
-// The file a player notices when a load was slow: what SISCO saw, and what to do. Plain text, beside the log.
-static void WriteSlowLoadFile() {
-    if (!g_slowFile[0]) return;
-    HANDLE f = CreateFileA(g_slowFile, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
-    if (f == INVALID_HANDLE_VALUE) return;
-    char cap[48] = "none", vs[48] = "no";
-    if (g_frameCap > 0) _snprintf_s(cap, sizeof(cap), _TRUNCATE, "%d fps (%s)", g_frameCap, g_frameCapFrom);
-    if (g_forcedInterval >= 1) _snprintf_s(vs, sizeof(vs), _TRUNCATE, "yes (d3d9.presentInterval %d)", g_forcedInterval);
-    char text[1400];
-    int n = _snprintf_s(text, sizeof(text), _TRUNCATE,
-        "SISCO: the last load was slow.\r\n\r\n%s\r\n\r\n"
-        "What SISCO could see: RTSS %s; DXVK's own frame cap %s; VSync forced in DXVK's config: %s; "
-        "SISCO's own presenting without VSync while the world builds: %s.\r\n"
-        "The full record is in SISCO.log beside this file. This file is written again only when a load is slow again.\r\n",
-        g_slowLoadNote, RtssLoaded() ? "loaded" : "not loaded", cap, vs,
-        !g_swapVtblHooked ? "not in effect (the Present hook did not go in; the log's present line says why)"
-        : g_forcedInterval >= 1 ? "overridden by that forced VSync" : "was in effect, so VSync itself is not the cause");
-    DWORD w; if (n > 0) WriteFile(f, text, (DWORD)n, &w, NULL);
-    CloseHandle(f);
-    SisLog("slowload", "written to %s", g_slowFile);
-}
 static DWORD WINAPI Worker(void*) {
     for (;;) {
         Sleep(1000);
         SisTick(NowMs(), g_brakeOn ? (int64_t)(LargestFreeBlock() >> 20) : -1);
-        if (g_slowLoadPending && InterlockedExchange(&g_slowLoadPending, 0)) WriteSlowLoadFile();
     }
 }
 
@@ -68,9 +46,12 @@ static DWORD WINAPI Worker(void*) {
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(h);
-    // One copy only. A loader that scans both the game folder and plugins\ would otherwise run two of everything,
-    // and the two workers would size, brake and guard the same budget table from their own separate state.
-    if (!CreateMutexA(NULL, FALSE, "SISCO.asi.single") || GetLastError() == ERROR_ALREADY_EXISTS) return TRUE;
+    // One copy per process. A loader that scans both the game folder and plugins\ would otherwise run two of everything,
+    // and the two workers would size, brake and guard the same budget table from their own separate state. The name
+    // carries the process id: a plain name is shared by the whole session, so a game still closing (an error box, a
+    // crash dialog) switched SISCO off in the next game started, with nothing in its log.
+    char once[40]; _snprintf_s(once, sizeof(once), _TRUNCATE, "SISCO.asi.single.%lu", GetCurrentProcessId());
+    if (!CreateMutexA(NULL, FALSE, once) || GetLastError() == ERROR_ALREADY_EXISTS) return TRUE;
     g_base = (uintptr_t)GetModuleHandleA(NULL);
     QueryPerformanceFrequency(&g_qpf); QueryPerformanceCounter(&g_qpc0);
     InitializeCriticalSection(&g_logCs);
@@ -80,9 +61,10 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (!pathN || pathN >= MAX_PATH - 4) return TRUE;         // no room to turn it into a .log name: nothing to write to
     char* dot = strrchr(path, '.'); if (dot) strcpy_s(dot, MAX_PATH - (dot - path), ".log");
     OpenLog(path);
-    // The slow-load file is the log's stem plus a longer suffix: a name that does not fit is never written at all.
-    if (_snprintf_s(g_slowFile, sizeof(g_slowFile), _TRUNCATE, "%.*s-SLOW-LOAD.txt", (int)(dot ? dot - path : (ptrdiff_t)strlen(path)), path) < 0) g_slowFile[0] = 0;
-    if (g_slowFile[0]) DeleteFileA(g_slowFile);              // only ever about this run
+    {   // 1.0.1 and 1.0.2 wrote SISCO-SLOW-LOAD.txt beside the log after a slow load; its advice is obsolete, so it goes
+        char old[MAX_PATH];
+        if (_snprintf_s(old, sizeof(old), _TRUNCATE, "%.*s-SLOW-LOAD.txt", (int)(dot ? dot - path : (ptrdiff_t)strlen(path)), path) > 0) DeleteFileA(old);
+    }
     // SISCO.ini sits beside the plugin and its log. Every key defaults to on, so a missing file, a missing key,
     // a typo or an unreadable value all leave the mod behaving exactly as it does with no file at all.
     char ini[MAX_PATH]; strcpy_s(ini, path);
@@ -105,55 +87,31 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     else _snprintf_s(sw, sizeof(sw), _TRUNCATE, "OFF: %s%s%s", g_set.fixes ? "" : "Fixes ",
                      g_set.limits ? "" : "Limits ", g_set.budget ? "" : "Budget ");
     SisLog("settings", "%s (%s)", sw, haveIni ? "SISCO.ini" : "no SISCO.ini, so the defaults");
-    if (IsWine()) SisLog("platform", "%s: Proton on the Steam Deck reads like this; the budget is asked for up to %d MB here, the brake follows the memory layout, and the size and brake lines record it",
-                         g_wineNote, WINE_BUDGET_MAX_MB);
+    if (IsWine()) SisLog("platform", "%s: Proton on the Steam Deck reads like this; where the largest free block is under %d MB at sizing the budget is asked for up to %d MB, the brake follows the memory layout, and the size and brake lines record it",
+                         g_wineNote, WINE_ROOMY_MB, WINE_BUDGET_MAX_MB);
     if (!g_set.enabled) {
         SisLog("sis", "SISCO changes nothing this run. Set Enabled=1 in SISCO.ini to turn it back on.");
         return TRUE;
     }
-    // DXVK's config, read as DXVK 3.1 reads it: DXVK_CONFIG_FILE if set, else dxvk.conf in the game's working folder
-    // (the exe's, from Steam and a shortcut alike), then the DXVK_CONFIG variable over it. A cap or a forced VSync
-    // found there holds -managed and the budget (the size line says so); the driver's cap and RTSS's figure are not
-    // visible, RTSS itself is (its module, at Direct3DCreate9).
-    {
-        char exe[MAX_PATH] = "", conf[MAX_PATH] = "";
-        GetModuleFileNameA(NULL, exe, MAX_PATH);
-        const char* exeName = strrchr(exe, '\\'); exeName = exeName ? exeName + 1 : exe;
-        const char* confFrom = "DXVK_CONFIG_FILE";
-        if (!GetEnvironmentVariableA("DXVK_CONFIG_FILE", conf, MAX_PATH) || !conf[0]) {
-            _snprintf_s(conf, MAX_PATH, _TRUNCATE, "%.*sdxvk.conf", (int)(exeName - exe), exe);
-            confFrom = "dxvk.conf";
-        }
-        DxvkConf dc = { CONF_UNSET, CONF_UNSET, CONF_UNSET, "", "", "" };
-        static char text[16384];                              // a dxvk.conf is a few KB; a larger one is read this far
-        HANDLE cf = CreateFileA(conf, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-        bool haveConf = false;
-        if (cf != INVALID_HANDLE_VALUE) {
-            DWORD n = 0;
-            if (ReadFile(cf, text, sizeof(text) - 1, &n, NULL)) { DxvkConfParse(text, n, '\n', exeName, confFrom, &dc); haveConf = true; }
-            CloseHandle(cf);
-        }
-        char env[1024] = "";
-        DWORD en = GetEnvironmentVariableA("DXVK_CONFIG", env, sizeof(env));
-        if (en && en < sizeof(env)) DxvkConfParse(env, en, ';', exeName, "DXVK_CONFIG", &dc);
-        int cap = dc.dxvkCap != CONF_UNSET ? dc.dxvkCap : dc.d3d9Cap;
-        if (cap != CONF_UNSET && cap > 0) { g_frameCap = cap; strcpy_s(g_frameCapFrom, dc.dxvkCap != CONF_UNSET ? dc.dxvkCapFrom : dc.d3d9CapFrom); }
-        if (dc.interval != CONF_UNSET && dc.interval >= 0) g_forcedInterval = dc.interval;
-        char capText[64] = "none", vsText[64] = "not forced";
-        if (g_frameCap) _snprintf_s(capText, sizeof(capText), _TRUNCATE, "%d fps (%s)", g_frameCap, g_frameCapFrom);
-        if (g_forcedInterval >= 0) _snprintf_s(vsText, sizeof(vsText), _TRUNCATE, "forced, d3d9.presentInterval %d (%s)", g_forcedInterval, dc.intervalFrom);
-        SisLog("dxvkconf", "%s for %s: DXVK's own frame cap %s, VSync %s%s", haveConf ? confFrom : "no dxvk.conf", exeName, capText, vsText,
-               g_frameCap || g_forcedInterval >= 1 ? ": -managed will not be set and the budget stays the game's own (the size line says why)"
-               : "; the driver's cap and RTSS's figure cannot be seen, the load line shows the build's rate");
+    // The engine-sound slots are declared in a file SISCO writes, pc\audio\config\waveslots_sisco.xml; the table is only
+    // moved once that file is on disk, so it is prepared here, before the install.
+    if (g_set.limits) {
+        char gd[MAX_PATH] = ""; GetModuleFileNameA(NULL, gd, MAX_PATH);
+        char* gs = strrchr(gd, '\\'); if (gs) *gs = 0;
+        PlanEngineSlots(GameCoreSites(), gd);
     }
     SisLoadResult r = SisInstall(GameCoreSites());
     char a[128], b[128], c[128], d[128];
     if (!g_set.fixes) SisLog("fixes", "off (Fixes=0 in SISCO.ini)");
     else SisLog("fixes", "release queue %s; link-pool lock %s; startup race %s", r.queue ? "ON" : "OFF", r.lock ? "ON" : "OFF", r.race ? "ON" : "OFF");
     if (!g_set.limits) SisLog("limits", "off (Limits=0 in SISCO.ini)");
-    else SisLog("limits", "VehicleStruct %s; drawable slots %s; links %s; arena in KB %s",
-                SiteText(S_VSTRUCT, a, sizeof(a)), SiteText(S_SLOT_SIZE, b, sizeof(b)), SiteText(S_LINK_SIZE, c, sizeof(c)),
-                SiteText(S_ARENA_SIZE, d, sizeof(d)));
+    else {
+        SisLog("limits", "VehicleStruct %s; drawable slots %s; links %s; arena in KB %s",
+               SiteText(S_VSTRUCT, a, sizeof(a)), SiteText(S_SLOT_SIZE, b, sizeof(b)), SiteText(S_LINK_SIZE, c, sizeof(c)),
+               SiteText(S_ARENA_SIZE, d, sizeof(d)));
+        SisLog("audio", "engine sound slots %s%s%s", SiteText(S_ENGINE, a, sizeof(a)),
+               g_engineOn ? "; declared in pc\\audio\\config\\waveslots_sisco.xml, built from " : "", g_engineOn ? g_enginePlan.from : "");
+    }
     SisLog("direct3d", "hook %s", SiteText(S_D3D_IAT, a, sizeof(a)));
     // Every site of the three fixes, named only when one of them is off: the lines above say which fix, this says
     // which site and why. The sites after this one carry their own reason in the lines above.

@@ -334,7 +334,6 @@ static uint8_t g_tGafm[4] = { 0x55, 0x8B, 0xEC, 0x83 };
 static uint8_t g_tMemRestrictTest[13] = { 0x83, 0x3D, 0x78, 0xAB, 0x0A, 0x01, 0x00, 0x0F, 0x85, 0x58, 0x01, 0x00, 0x00 };
 static uint32_t g_tNoMemRestrict, g_tMemRestrict;
 static uint32_t g_tSetView = 99, g_tSetDetail = 99, g_tSetCars = 50;
-static uint32_t g_tFrame;                            // the game's frame counter, advanced by the cases that measure the load
 // The four size sites as the raises left them, and the VehicleStruct pool as the game built it, for the read-back at sizing.
 static uint8_t g_tSzSlot[5], g_tSzLink[5], g_tSzArena[5], g_tSzVs[9];
 static uint32_t g_tSzVsPoolObj[8], g_tSzVsPool;
@@ -379,12 +378,14 @@ static void TSizeReset(int dxvk, int64_t bootMb, uint32_t veh, uint32_t ped) {
     g_cs.slotSize = (uintptr_t)g_tSzSlot; g_cs.linkSize = (uintptr_t)g_tSzLink; g_cs.arenaSize = (uintptr_t)g_tSzArena;
     g_cs.vstructSize = (uintptr_t)g_tSzVs; g_cs.vstructPool = (uintptr_t)&g_tSzVsPool;
     g_raised[S_SLOT_SIZE] = 32768; g_raised[S_LINK_SIZE] = 65536; g_raised[S_ARENA_SIZE] = 400u * 1024u; g_raised[S_VSTRUCT] = 100;
-    g_dxvkVer[0] = g_dxvkVer[1] = g_dxvkVer[2] = -1; g_capNote[0] = 0; g_frameCap = 0; g_frameCapFrom[0] = 0; g_forcedInterval = -1; g_tRtss = 0;
+    g_dxvkVer[0] = g_dxvkVer[1] = g_dxvkVer[2] = -1;
     g_tWine = 0; g_wineNote[0] = 0; g_tAddrSpace.largest = g_tAddrSpace.total = 0; g_tAddrSpace.blocks = 0;
-    g_worldMs = 0; g_worldFrame = 0; g_loadFps = -1; g_loadBuildS = 0; g_tFrame = 1000; g_cs.frameCounter = (uintptr_t)&g_tFrame;
-    g_ldUp = false; g_ldPending = true; g_ldEdgeMs = 0; g_ldX = -1; g_ldSteady = 0; g_ldVerdict = false; g_loadN = 0;   // as at the start: the next player is a load's edge
-    g_presentImmediate = 0; g_immediatePresents = 0;
-    g_slowLoadNote[0] = 0; g_slowLoadPending = 0; g_managedOn = true;
+    g_worldMs = 0; g_loadBuildS = 0;
+    g_ldUp = false; g_ldUpMs = 0; g_ldPending = true; g_ldEdgeMs = 0; g_ldX = -1; g_ldSteady = 0; g_ldVerdict = false; g_loadN = 0;   // as at the start: the next player is a load's edge
+    g_presentSkip = 0; g_skippedPresents = 0; g_lastShownMs = 0; g_tPresentMs = -1;
+    g_showMs = PRESENT_SHOW_MS; g_menuTicks = 0;
+    g_skipRtEnd = 0; g_skipEndedRt = 0;
+    g_managedOn = true;
 }
 
 // ------------------------------------------------------------------ the Complete Edition's shapes
@@ -927,77 +928,44 @@ static void CoreTests() {
         }
         // (6) The version is logged, and gates nothing: 2.6.2 gets -managed like 3.1.1. No marker: logged as such.
         memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v2.6.2", 7);
-        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0; g_frameCap = 0;
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0;
         create(32);
         CHECK(g_dxvk == 1 && g_dxvkVer[0] == 2 && g_dxvkVer[1] == 6 && g_dxvkVer[2] == 2 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && g_tPrm[2] != 0
-              && strstr(g_d3dNote, "DXVK 2.6.2") && strstr(g_d3dNote, "-managed set") && !g_capNote[0],
-              "Direct3D: DXVK 2.6.2: -managed set, the version in the line, no note: %s", g_d3dNote);
+              && strstr(g_d3dNote, "DXVK 2.6.2") && strstr(g_d3dNote, "-managed set"),
+              "Direct3D: DXVK 2.6.2: -managed set, the version in the line: %s", g_d3dNote);
         memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v3.1.1", 7);
-        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; strcpy_s(g_capNote, "stale from a capped run");
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0;
         create(32);
-        CHECK(g_dxvkVer[0] == 3 && g_dxvkVer[2] == 1 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && strstr(g_d3dNote, "DXVK 3.1.1 (read from the planted image)") && !g_capNote[0],
-              "Direct3D: DXVK 3.1.1: -managed set, the version in the line, a stale note cleared: %s", g_d3dNote);
+        CHECK(g_dxvkVer[0] == 3 && g_dxvkVer[2] == 1 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && strstr(g_d3dNote, "DXVK 3.1.1 (read from the planted image)"),
+              "Direct3D: DXVK 3.1.1: -managed set, the version in the line: %s", g_d3dNote);
         memset(tImg, 0xAB, sizeof(tImg));
         g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0;
         create(32);
         CHECK(g_dxvkVer[0] == -1 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && strstr(g_d3dNote, "version not found"),
               "Direct3D: no version marker: logged, and -managed set: %s", g_d3dNote);
-        // (7) A visible frame cap, or a VSync forced in DXVK's config: -managed is NOT set and the note names it and
-        // its source; a player's own -managed under the cap is kept and the note still written.
-        memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v3.1.1", 7);
-        g_frameCap = 30; strcpy_s(g_frameCapFrom, "dxvk.conf");
-        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
-        create(32);
-        CHECK(g_tPrm[1] == 0 && g_tPrm[2] != 0 && strstr(g_d3dNote, "-managed NOT set under a visible cap") && strstr(g_d3dNote, "frame cap 30 fps (dxvk.conf)")
-              && strstr(g_capNote, "cap of 30 fps (dxvk.conf)"),
-              "Direct3D: a 30 fps cap in dxvk.conf: -managed not set, -availablevidmem still set, the note names the cap: %s", g_d3dNote);
-        g_frameCap = 60;
-        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
-        create(32);
-        CHECK(g_tPrm[1] == 0 && g_capNote[0], "Direct3D: a 60 fps cap holds too (30 s of build measured)");
-        g_frameCap = 144;
-        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
-        create(32);
-        CHECK(g_tPrm[1] == 0 && g_capNote[0] && strstr(g_d3dNote, "frame cap 144 fps"),
-              "Direct3D: any visible DXVK cap holds, an immediate present does not bypass DXVK's limiter: %s", g_d3dNote);
-        g_frameCap = 30;
-        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = 0; g_tPrm[1] = 0x4321; g_tPrm[2] = 0; g_capNote[0] = 0;
-        create(32);
-        CHECK(g_tPrm[1] == 0x4321 && strstr(g_d3dNote, "still stays the game's own") && g_capNote[0],
-              "Direct3D: the player's own -managed under a 30 fps cap: kept, and the note that holds the budget is written: %s", g_d3dNote);
-        g_frameCap = 0; g_frameCapFrom[0] = 0; g_forcedInterval = 1;
-        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
-        create(32);
-        CHECK(g_tPrm[1] == 0 && strstr(g_capNote, "d3d9.presentInterval 1") && strstr(g_d3dNote, "VSync forced in DXVK's config"),
-              "Direct3D: a VSync forced in DXVK's config holds like a cap, since it overrides the immediate present: %s", g_d3dNote);
-        g_forcedInterval = 0;
-        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
-        create(32);
-        CHECK(g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && !g_capNote[0], "Direct3D: a forced interval of 0 (immediate) holds nothing");
-        g_forcedInterval = -1;
         // Wine (Proton, the Steam Deck): -managed is set as on Windows, the line names Wine, and a 2.x loaded as
         // d3d9.dll is named as Proton's choice rather than as the download's.
         g_tWine = 1; g_wineNote[0] = 0;
         memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v2.7.1", 7);
-        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_capNote[0] = 0;
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0;
         create(32);
-        CHECK(g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && g_managedOn && !g_capNote[0] && strstr(g_d3dNote, "Wine (planted)")
+        CHECK(g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && g_managedOn && strstr(g_d3dNote, "Wine (planted)")
               && strstr(g_d3dNote, "Proton chose this version"),
               "Direct3D: on Wine -managed is set as usual, and a 2.x is named as Proton's choice, not the download's: %s", g_d3dNote);
         g_tWine = 0; g_wineNote[0] = 0;
         memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v3.1.1", 7);
-        // (8) Immediate presents while the world builds. With -managed in effect the first Direct3DCreate9 hooks
-        // CreateDevice on the object; the device it returns has its swap chain's Present hooked, and released as
-        // many times as taken; nothing goes out immediately until the worker raises the flag (its side is under
-        // "load" below), then every present carries FORCEIMMEDIATE on top of the game's own flags. The fake vtables
-        // sit in a read-only page for this, as DXVK's do, so the write has to lift the protection and put it back.
+        // (7) Presents not made while a load is in progress. With -managed in effect the first Direct3DCreate9 hooks
+        // CreateDevice on the object; the device it returns has its swap chain's Present hooked, and released as many
+        // times as taken; nothing is skipped until the worker raises the flag (its side is under "load" below), and a
+        // present that goes out goes out with the game's own flags, untouched. The fake vtables sit in a read-only
+        // page for this, as DXVK's do, so the write has to lift the protection and put it back.
         g_tD3DVtbl[16] = (void*)FakeCreateDevice; g_tSwapVtbl[3] = (void*)FakeSwapPresent;   // the writable fakes, as built: (6) hooked the first
         void** roD3D = (void**)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         void** roDev = roD3D + 32; void** roSwap = roD3D + 64;
         memcpy(roD3D, g_tD3DVtbl, sizeof(g_tD3DVtbl)); memcpy(roDev, g_tDevVtbl, sizeof(g_tDevVtbl)); memcpy(roSwap, g_tSwapVtbl, sizeof(g_tSwapVtbl));
         DWORD roOld = 0; VirtualProtect(roD3D, 4096, PAGE_READONLY, &roOld);
         g_tD3D.vtbl = roD3D; g_tDev.vtbl = roDev; g_tSwap.vtbl = roSwap;
-        g_d3dVtblHooked = NULL; g_swapVtblHooked = NULL; g_oCreateDevice = NULL; g_oSwapPresent = NULL; g_presentImmediate = 0; g_immediatePresents = 0; g_tSwapRefs = 0;
+        g_d3dVtblHooked = NULL; g_swapVtblHooked = NULL; g_oCreateDevice = NULL; g_oSwapPresent = NULL; g_presentSkip = 0; g_skippedPresents = 0; g_tSwapRefs = 0;
         g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0;
         create(32);
         CHECK(g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && g_d3dVtblHooked == roD3D && roD3D[16] == (void*)HkCreateDevice,
@@ -1006,15 +974,49 @@ static void CoreTests() {
         CHECK(roMbi.Protect == PAGE_READONLY, "present: the page is read-only again after the write (%08X)", (unsigned)roMbi.Protect);
         void* dev = NULL;
         ((CreateDevice_t)roD3D[16])(&g_tD3D, 0, 1, NULL, 0, NULL, &dev);
-        CHECK(dev == &g_tDev && g_tDevCreates == 1 && g_swapVtblHooked == roSwap && roSwap[3] == (void*)HkSwapPresent && g_presentImmediate == 0 && g_tSwapRefs == 0,
-              "present: the device came from the original, its swap chain's Present is hooked and released once, and nothing goes out immediately yet");
+        CHECK(dev == &g_tDev && g_tDevCreates == 1 && g_swapVtblHooked == roSwap && roSwap[3] == (void*)HkSwapPresent && g_presentSkip == 0 && g_tSwapRefs == 0,
+              "present: the device came from the original, its swap chain's Present is hooked and released once, and nothing is skipped yet");
         g_tSwapFlags = 0xFFFFFFFFu;
         ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 1);                  // D3DPRESENT_DONOTWAIT, as a game may send it
-        CHECK(g_tSwapFlags == 1 && g_immediatePresents == 0, "present: before the player appears the present goes out as the game sent it (%08X)", (unsigned)g_tSwapFlags);
-        g_presentImmediate = 1;
-        ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 1);
-        CHECK(g_tSwapFlags == 0x101 && g_immediatePresents == 1, "present: while the world builds the present carries D3DPRESENT_FORCEIMMEDIATE (0x100) on top of the game's flags (%08X)", (unsigned)g_tSwapFlags);
-        g_presentImmediate = 0; g_immediatePresents = 0;
+        CHECK(g_tSwapFlags == 1 && g_skippedPresents == 0, "present: outside a build the present goes out exactly as the game sent it (%08X)", (unsigned)g_tSwapFlags);
+        // Skipping: with the flag up, a present within PRESENT_SHOW_MS of the last one shown is not made at all (the
+        // original never called, S_OK returned, counted); the next past that goes through, as the game sent it.
+        g_presentSkip = 1; g_lastShownMs = 0; g_skippedPresents = 0; g_tPresentMs = 5000; g_showMs = PRESENT_SHOW_MS;
+        LONG shown0 = g_tSwapPresents; g_tSwapFlags = 0xFFFFFFFFu;
+        HRESULT hs = ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 0);
+        CHECK(hs == S_OK && g_tSwapPresents == shown0 + 1 && g_tSwapFlags == 0 && g_skippedPresents == 0 && g_lastShownMs == 5000,
+              "present: skipping: the first present goes through, as the game sent it");
+        g_tPresentMs = 5050; g_tSwapFlags = 0xFFFFFFFFu;
+        hs = ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 0);
+        CHECK(hs == S_OK && g_tSwapPresents == shown0 + 1 && g_tSwapFlags == 0xFFFFFFFFu && g_skippedPresents == 1,
+              "present: skipping: 50 ms later the present is not made and S_OK is returned");
+        g_tPresentMs = 5100;
+        hs = ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 0);
+        CHECK(hs == S_OK && g_tSwapPresents == shown0 + 2 && g_tSwapFlags == 0 && g_lastShownMs == 5100,
+              "present: skipping: at 100 ms one goes through again");
+        // On a loading screen the rate is 33 ms: 20 ms later not made, 33 ms later shown.
+        g_showMs = PRESENT_SHOW_LOADING_MS; g_tPresentMs = 5133;
+        ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 0);
+        LONG s133 = g_tSwapPresents;
+        CHECK(s133 == shown0 + 3, "present: on a loading screen, 33 ms after the last shown the next goes through");
+        g_tPresentMs = 5153; ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 0);
+        CHECK(g_tSwapPresents == s133, "present: 20 ms after that one the next is not made");
+        g_tPresentMs = 5166; ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 0);
+        CHECK(g_tSwapPresents == s133 + 1, "present: and 33 ms after it the next goes through");
+        // The world's render targets end the skip on the present that sees them, even within the 100 ms: that frame
+        // and every one after goes out as the game sent it.
+        uintptr_t keepRt0 = g_cs.rt0; static uint64_t rtNow; g_cs.rt0 = (uintptr_t)&rtNow;
+        g_showMs = PRESENT_SHOW_MS; g_skipRtEnd = 126; rtNow = 63ull << 20; g_tPresentMs = 6000;
+        ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 0);
+        LONG s6 = g_tSwapPresents; g_tPresentMs = 6020;
+        ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 0);
+        CHECK(g_tSwapPresents == s6 && g_presentSkip == 1, "present: the loading screen's 63 MB set: still skipping");
+        rtNow = 469ull << 20; g_tPresentMs = 6040;
+        ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 0);
+        CHECK(g_tSwapPresents == s6 + 1 && g_presentSkip == 0 && g_skipEndedRt == 469,
+              "present: the world's set (469 MB, over twice 63) ends the skip on that very present, 40 ms after the last shown");
+        g_cs.rt0 = keepRt0; g_skipRtEnd = 0; g_skipEndedRt = 0;
+        g_presentSkip = 0; g_skippedPresents = 0; g_tPresentMs = -1; g_showMs = PRESENT_SHOW_MS;
         // A second Direct3DCreate9 hooks nothing again, and a second CreateDevice leaves the one hook as it is.
         ((CreateDevice_t)roD3D[16])(&g_tD3D, 0, 1, NULL, 0, NULL, &dev);
         CHECK(g_tDevCreates == 2 && roSwap[3] == (void*)HkSwapPresent && g_oSwapPresent == (SwapPresent_t)FakeSwapPresent && g_tSwapRefs == 0,
@@ -1022,7 +1024,7 @@ static void CoreTests() {
         g_tD3D.vtbl = g_tD3DVtbl; g_tDev.vtbl = g_tDevVtbl; g_tSwap.vtbl = g_tSwapVtbl; VirtualFree(roD3D, 0, MEM_RELEASE);
         g_d3dVtblHooked = NULL; g_swapVtblHooked = NULL; g_oCreateDevice = NULL; g_oSwapPresent = NULL;
         g_tDxvkImage = NULL; g_tDxvkImageN = 0;
-        g_dxvkVer[0] = g_dxvkVer[1] = g_dxvkVer[2] = -1; g_capNote[0] = 0;
+        g_dxvkVer[0] = g_dxvkVer[1] = g_dxvkVer[2] = -1;
         g_tPrm[0] = 0; g_tPrm[1] = (uint32_t)(uintptr_t)g_flagArg; g_tPrm[2] = (uint32_t)(uintptr_t)g_vidmemArg;
         keep.prmUnmanaged = c.prmUnmanaged; keep.prmManaged = c.prmManaged; keep.prmVidmem = c.prmVidmem;
         g_cs = keep;
@@ -1065,9 +1067,10 @@ static void CoreTests() {
         CHECK(SizeBudget(2922, 373, 800, false, &tv) == tv && tv >= 1380 && tv <= 1392, "rule: 3 GB at 1080p: about 1,390 (%d)", tv);
         CHECK(SizeBudget(1948, 373, 800, false, &tv) == 800, "rule: 2 GB: the game's own (%d)", tv);
         CHECK(SizeBudget(6000, 799, 800, true, &tv) == tv && tv < SizeBudget(6000, 799, 800, false, NULL), "rule: FusionFix's ExtraStreamingMemory: smaller (%d)", tv);
-        CHECK(CarPedFor(CAR_STOCK, 4000, 800) == 200000000u && CarPedFor(PED_STOCK, 2000, 800) == 200000000u && CarPedFor(CAR_STOCK, 800, 800) == CAR_STOCK
-              && CarPedFor(PED_STOCK, 300, 800) == PED_STOCK && CarPedFor(CAR_STOCK, 1400, 800) == 120000000u,
-              "rule: car and ped budgets 200 MB from a 2000 MB budget, the game's own at its stock budget, linear between");
+        CHECK(CarPedFor(CAR_STOCK, CAR_FULL, 4000, 800) == 200000000u && CarPedFor(PED_STOCK, PED_FULL, 2000, 800) == 180000000u
+              && CarPedFor(CAR_STOCK, CAR_FULL, 800, 800) == CAR_STOCK && CarPedFor(PED_STOCK, PED_FULL, 300, 800) == PED_STOCK
+              && CarPedFor(CAR_STOCK, CAR_FULL, 1400, 800) == 120000000u && CarPedFor(PED_STOCK, PED_FULL, 1400, 800) == 115000000u,
+              "rule: car 200 MB and ped 180 MB from a 2000 MB budget, the game's own at its stock budget, linear between");
     }
     // ---- once the world is loaded: the sizing (only when the render targets have settled), the car and ped budgets and
     // their guard, and the brake, which takes from the world: the car and ped budgets follow the budget itself
@@ -1123,7 +1126,7 @@ static void CoreTests() {
         g_tRt0 = 799ull << 20; for (int i = 0; i < SETTLE_TICKS + 1; i++) { SisTick(tick, 3000); tick += 1000; }
         CHECK(g_sized && g_sizedX == 799 && TTabAll(4000) && g_sizedT == 4000 && g_brakeOn && g_brakeCfg.floorMb == TStockFloor(2),
               "world: sized once they held for SETTLE_TICKS, at the full size (X %d): %s", g_sizedX, g_sizeNote);
-        CHECK(g_tVeh == 200000000u && g_tPed == 200000000u && g_car.on && g_ped.on, "world: car and ped budgets 200 MB (%u, %u)", g_tVeh, g_tPed);
+        CHECK(g_tVeh == 200000000u && g_tPed == 180000000u && g_car.on && g_ped.on, "world: car budget 200 MB, ped budget 180 MB (%u, %u)", g_tVeh, g_tPed);
         CHECK(g_setView == 24 && g_setDetail == 30 && g_setCars == 29, "display: the sliders were read at sizing (%u, %u, %u)", g_setView, g_setDetail, g_setCars);
         g_tPed = 250000000u; g_tVeh = 100000000u; SisTick(20000, 3000);
         CHECK(g_ped.target == 250000000u && g_tPed == 250000000u && g_tVeh == 200000000u && g_car.target == 200000000u,
@@ -1138,7 +1141,7 @@ static void CoreTests() {
               "brake: still nothing off the cars and peds while the budget is over 2000 MB (car %u, ped %u)", g_tVeh, g_tPed);
         int64_t ms = 102000;                                  // an emergency steps every 10 s, fall or not
         while (g_brakeSt.t > 1400 && ms < 400000) { SisTick(ms, 100); ms += 11000; }
-        uint32_t wantCar = CarPedFor(CAR_STOCK, g_brakeSt.t, TStockFloor(2));
+        uint32_t wantCar = CarPedFor(CAR_STOCK, CAR_FULL, g_brakeSt.t, TStockFloor(2));
         CHECK(g_tVeh == wantCar && wantCar < 200000000u && wantCar > CAR_STOCK && g_tPed == 250000000u && g_car.target == wantCar,
               "brake: under 2000 MB the car budget follows the world (budget %d MB, car %u MB), the larger ped budget stands",
               g_brakeSt.t, g_tVeh / 1000000);
@@ -1165,7 +1168,7 @@ static void CoreTests() {
         TSizeReset(1, 6000, CAR_STOCK, PED_STOCK); g_tTab[47] = 4000ull << 20; TSizeSettle(1000, 3000);
         CHECK(TTabAll(4000) && strstr(g_sizeNote, "larger value already in the table"), "world: a larger value already in the table stands");
         TSizeReset(1, 23370, 250000000u, PED_STOCK); TSizeSettle(1000, 3000);
-        CHECK(g_tVeh == 250000000u && g_car.target == 250000000u && g_tPed == 200000000u && strstr(g_sizeNote, "another mod set kept"),
+        CHECK(g_tVeh == 250000000u && g_car.target == 250000000u && g_tPed == 180000000u && strstr(g_sizeNote, "another mod set kept"),
               "world: FusionFix's larger car budget, there before the world loaded, stands");
         // The value another mod set before the world loaded is its value, so the brake may not take it either. Before
         // this was recorded at sizing, the guard's floor was zero and a brake step cut it to the game's own.
@@ -1217,112 +1220,121 @@ static void CoreTests() {
         TSizeSettle(1000, 3000);
         CHECK(g_sized && g_site[S_VSTRUCT].state == ST_ON && !g_carHeld && g_tVeh == 200000000u && strstr(g_builtNote, "VehicleStruct pool 120"),
               "built: a pool built larger than SISCO asked stands: %s", g_builtNote);
-        // A frame cap: -managed was not set at Direct3DCreate9, the game runs its pool unmanaged, and the size line
-        // says why, naming the cap, instead of the generic unmanaged text.
-        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
-        strcpy_s(g_capNote, "a frame-rate cap of 30 fps (dxvk.conf): planted"); g_tPoolMode = 0;
-        TSizeSettle(1000, 3000);
-        CHECK(g_sized && g_sizedT == TStockFloor(2) && strstr(g_sizeNote, "cap of 30 fps") && !strstr(g_sizeNote, "-nominimize"),
-              "built: under a frame cap the budget stays the game's own and the line names the cap: %s", g_sizeNote);
-        // The same with the pool MANAGED, which is what a player's own -managed under the cap leaves: still held.
-        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
-        strcpy_s(g_capNote, "a frame-rate cap of 30 fps (dxvk.conf): planted"); g_tPoolMode = 1;
-        TSizeSettle(1000, 3000);
-        CHECK(g_sized && g_sizedT == TStockFloor(2) && memcmp(g_tTab, kCtStockTable, sizeof(g_tTab)) == 0 && strstr(g_sizeNote, "cap of 30 fps"),
-              "built: under a frame cap with the player's own -managed the budget still stays the game's own: %s", g_sizeNote);
-        g_capNote[0] = 0;
         // The load line: the build is timed from the player appearing (the edge: the loading flag down, the player in
-        // the world) to the last change of the render targets, once they have held LOAD_STEADY_TICKS, and its frame
-        // rate comes from the game's counter over that span alone, not the settle after it.
+        // the world) to the last change of the render targets, once they have held LOAD_STEADY_TICKS.
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
-        g_tRt0 = 63ull << 20; g_tFrame = 1000; SisTick(1000, 3000);                      // the edge, at the first stage
+        g_tRt0 = 63ull << 20; SisTick(1000, 3000);                                        // the edge, at the first stage
         CHECK(g_worldLogged && g_worldMs == 1000 && g_loadN == 1 && !g_ldVerdict, "load: the edge is the first tick the player stands in the world with the flag down");
-        g_tRt0 = 799ull << 20; g_tFrame = 1000 + 30 * 4; SisTick(5000, 3000);            // the last change 4 s later: 30 fps over the build
-        g_tFrame += 1000; SisTick(6000, 3000); SisTick(7000, 3000);                       // a thousand frames of settle, which must not count
+        g_tRt0 = 799ull << 20; SisTick(5000, 3000);                                      // the last change 4 s later
+        SisTick(6000, 3000); SisTick(7000, 3000);
         CHECK(!g_ldVerdict, "load: no verdict until the targets have held %d ticks", LOAD_STEADY_TICKS);
         SisTick(8000, 3000);
-        CHECK(g_ldVerdict && g_loadBuildS == 4 && g_loadFps == 30 && !g_slowLoadNote[0], "load: the world built in 4 s at 30 fps, the settle after it not counted (%lld s, %d fps)", g_loadBuildS, g_loadFps);
-        // Already final at the edge: a build of 0 s and no rate invented.
+        CHECK(g_ldVerdict && g_loadBuildS == 4, "load: the world built in 4 s, the settle after it not counted (%lld s)", g_loadBuildS);
+        // Already final at the edge: a build of 0 s.
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
-        g_tRt0 = 799ull << 20; g_tFrame = 1000; SisTick(1000, 3000);
-        g_tFrame = 5000; for (int i = 2; i <= 4; i++) SisTick(i * 1000, 3000);
-        CHECK(g_ldVerdict && g_loadBuildS == 0 && g_loadFps == -1, "load: targets final at the edge: a 0 s build, no rate (%lld s, %d fps)", g_loadBuildS, g_loadFps);
-        // No frame counter (the Complete Edition): the duration alone.
-        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_cs.frameCounter = 0;
-        g_tRt0 = 63ull << 20; SisTick(1000, 3000); g_tRt0 = 799ull << 20; SisTick(4000, 3000);
-        for (int i = 5; i <= 7; i++) SisTick(i * 1000, 3000);
-        CHECK(g_ldVerdict && g_loadBuildS == 3 && g_loadFps == -1, "load: without the counter the duration is timed and no rate is given (%lld s)", g_loadBuildS);
-        // A slow load is said and handed to the worker for the file: a build over LOAD_SLOW_S with -managed in effect.
+        g_tRt0 = 799ull << 20; SisTick(1000, 3000);
+        for (int i = 2; i <= 4; i++) SisTick(i * 1000, 3000);
+        CHECK(g_ldVerdict && g_loadBuildS == 0, "load: targets final at the edge: a 0 s build (%lld s)", g_loadBuildS);
         // A first stage under 128 MB is not the build's end however long it holds (the heavy install held it 23 s), so
         // the verdict waits for the stage after it.
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
-        g_tRt0 = 63ull << 20; g_tFrame = 1000; SisTick(1000, 3000);
-        for (int i = 2; i <= 21; i++) { g_tFrame += 8; SisTick(i * 1000, 3000); }        // the first stage holds 20 s at 8 fps
-        CHECK(!g_ldVerdict && g_presentImmediate == 0, "slowload: no verdict while the first stage holds (and nothing flagged without the hook)");
-        g_tRt0 = 799ull << 20; g_tFrame += 8; SisTick(22000, 3000);                        // the build ends 21 s after the edge
+        g_tRt0 = 63ull << 20; SisTick(1000, 3000);
+        for (int i = 2; i <= 21; i++) SisTick(i * 1000, 3000);                            // the first stage holds 20 s
+        CHECK(!g_ldVerdict && g_presentSkip == 0, "load: no verdict while the first stage holds (and nothing skipped without the hook)");
+        g_tRt0 = 799ull << 20; SisTick(22000, 3000);
         for (int i = 23; i <= 25; i++) SisTick(i * 1000, 3000);
-        CHECK(g_ldVerdict && g_loadBuildS == 21 && g_loadFps == 8 && strstr(g_slowLoadNote, "21 s to build") && strstr(g_slowLoadNote, "nothing SISCO can see") && g_slowLoadPending,
-              "slowload: a 21 s build at 8 fps is slow, nothing visible is named as such: %s", g_slowLoadNote);
-        // Exactly at the threshold: not slow.
-        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
-        g_tRt0 = 63ull << 20; SisTick(1000, 3000); g_tRt0 = 799ull << 20; SisTick(21000, 3000);
-        for (int i = 22; i <= 24; i++) SisTick(i * 1000, 3000);
-        CHECK(g_ldVerdict && g_loadBuildS == 20 && !g_slowLoadNote[0] && !g_slowLoadPending, "slowload: a 20 s build is not called slow (%lld s)", g_loadBuildS);
-        // What is named: DXVK's own cap, a forced VSync, RTSS, in that order of what SISCO can see.
-        auto slow22 = []() { g_tRt0 = 63ull << 20; SisTick(1000, 3000); g_tRt0 = 799ull << 20; SisTick(23000, 3000); for (int i = 24; i <= 26; i++) SisTick(i * 1000, 3000); };
-        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_frameCap = 30; strcpy_s(g_frameCapFrom, "dxvk.conf"); slow22();
-        CHECK(strstr(g_slowLoadNote, "DXVK's own frame cap of 30 fps (dxvk.conf)"), "slowload: a visible DXVK cap is named: %s", g_slowLoadNote);
-        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_forcedInterval = 1; slow22();
-        CHECK(strstr(g_slowLoadNote, "d3d9.presentInterval 1"), "slowload: a VSync forced in DXVK's config is named: %s", g_slowLoadNote);
-        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tRtss = 1; slow22();
-        CHECK(strstr(g_slowLoadNote, "RTSS is loaded"), "slowload: RTSS is named when it is loaded: %s", g_slowLoadNote);
-        // Without -managed there is nothing to say: the build is not paced by presents then.
-        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_managedOn = false; slow22();
-        CHECK(g_ldVerdict && g_loadBuildS == 22 && !g_slowLoadNote[0] && !g_slowLoadPending, "slowload: nothing said without -managed in effect");
-        g_managedOn = true;
-        // The render targets never hold: the verdict comes at the ceiling and says so, and that is slow.
+        CHECK(g_ldVerdict && g_loadBuildS == 21, "load: a 21 s build is timed to the stage after the first (%lld s)", g_loadBuildS);
+        // The render targets never hold: the verdict comes at the ceiling and says so.
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
         g_tRt0 = 63ull << 20; SisTick(1000, 3000);
         for (int i = 2; i <= 91; i++) { g_tRt0 = (uint64_t)(100 + i) << 20; SisTick(i * 1000, 3000); }
-        CHECK(g_ldVerdict && g_loadBuildS == 90 && g_slowLoadPending, "slowload: targets that never hold: the verdict at the ceiling, and it is slow (%lld s)", g_loadBuildS);
-        // Every load is judged, not the first alone: a save switch (the flag up, then the player again) is timed again
-        // and a slow one is handed to the worker again.
+        CHECK(g_ldVerdict && g_loadBuildS == 90, "load: targets that never hold: the verdict at the ceiling (%lld s)", g_loadBuildS);
+        // Every load is timed, not the first alone: a save switch (the flag up, then the player again) has its own edge.
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
         g_tRt0 = 799ull << 20; SisTick(1000, 3000); for (int i = 2; i <= 4; i++) SisTick(i * 1000, 3000);
-        CHECK(g_ldVerdict && g_loadN == 1 && !g_slowLoadPending, "slowload: the first load, fast");
+        CHECK(g_ldVerdict && g_loadN == 1, "load: the first load timed");
         g_tLoad = 1; SisTick(20000, 3000); SisTick(21000, 3000);
         g_tLoad = 0; g_tRt0 = 63ull << 20; SisTick(22000, 3000);
-        CHECK(g_loadN == 2 && g_worldMs == 22000 && !g_ldVerdict, "slowload: a save switch is a new load with its own edge");
+        CHECK(g_loadN == 2 && g_worldMs == 22000 && !g_ldVerdict, "load: a save switch is a new load with its own edge");
         g_tRt0 = 799ull << 20; SisTick(44000, 3000); for (int i = 45; i <= 47; i++) SisTick(i * 1000, 3000);
-        CHECK(g_ldVerdict && g_loadBuildS == 22 && g_slowLoadPending, "slowload: and a slow second load is said and handed to the worker (%lld s)", g_loadBuildS);
-        // The presents while the world builds, from the worker's side, with the hook in: up from the edge, held while
-        // the targets change and for at least 15 s, then handed back; a new load's flag drops it until its own edge.
+        CHECK(g_ldVerdict && g_loadBuildS == 22, "load: and it is timed on its own (%lld s)", g_loadBuildS);
+        // The presents from the worker's side, with the hook in: skipped at 33 ms while a loading screen is up, at 100 ms
+        // from the edge until the finished set has held a tick, not at the menu; a new load's flag starts over.
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_swapVtblHooked = g_tSwapVtbl;
         g_tLoad = 1; TPlayerInWorld(false); SisTick(1000, 3000); SisTick(2000, 3000);
-        CHECK(g_presentImmediate == 0 && !g_worldLogged, "present: nothing while the loading flag is up");
+        CHECK(g_presentSkip == 1 && g_showMs == PRESENT_SHOW_LOADING_MS && !g_worldLogged && g_ldUpMs == 1000,
+              "present: while a loading screen is up most presents are not made, one shown every 33 ms; the screen's start is kept");
         g_tLoad = 0; SisTick(3000, 3000);
-        CHECK(g_presentImmediate == 0 && !g_worldLogged, "present: the flag dropped with no player (the main menu): still nothing");
-        TPlayerInWorld(true); g_tRt0 = 63ull << 20; SisTick(4000, 3000);
-        CHECK(g_presentImmediate == 1 && g_worldLogged && g_immediatePresents == 0, "present: the player appeared: presents go out immediately from this tick, the count reset");
-        g_tRt0 = 799ull << 20; SisTick(6000, 3000);
-        for (int i = 7; i <= 18; i++) SisTick(i * 1000, 3000);
-        CHECK(g_presentImmediate == 1 && g_ldVerdict, "present: the world built and judged, still held one tick before 15 s");
-        SisTick(19000, 3000);
-        CHECK(g_presentImmediate == 0 && g_ldEdgeMs == 0, "present: VSync handed back 15 s after the player appeared");
-        // A late stage: the targets change after 15 s, so the hold runs on until they have held 3 ticks.
-        g_tLoad = 1; SisTick(20000, 3000); g_tLoad = 0; g_tRt0 = 63ull << 20; SisTick(21000, 3000);
-        CHECK(g_presentImmediate == 1, "present: a save switch puts it up again at its own edge");
-        for (int i = 22; i <= 36; i++) SisTick(i * 1000, 3000);                              // the first stage holds 15 s
-        CHECK(g_presentImmediate == 1 && !g_ldVerdict, "present: 15 s up but the world not built: held");
+        CHECK(g_presentSkip == 1 && !g_worldLogged, "present: the flag dropped with nobody in the world yet: one tick of grace, the player can follow");
+        SisTick(4000, 3000);
+        CHECK(g_presentSkip == 0 && !g_worldLogged, "present: two ticks with nobody in the world (the menu): presents as the game makes them");
+        TPlayerInWorld(true); g_tRt0 = 63ull << 20; SisTick(5000, 3000);
+        CHECK(g_presentSkip == 1 && g_showMs == PRESENT_SHOW_MS && g_worldLogged && g_skippedPresents == 0 && g_ldEdgeMs == 5000,
+              "present: the player appeared: skipping at 100 ms from this tick, the counts reset since no loading screen was being skipped");
+        g_tRt0 = 468ull << 20; SisTick(6000, 3000);
+        g_tRt0 = 799ull << 20; SisTick(7000, 3000);
+        CHECK(g_presentSkip == 1, "present: still skipping on the tick the finished set appears");
+        SisTick(8000, 3000);
+        CHECK(g_presentSkip == 0 && g_ldEdgeMs != 0, "present: skipping ends once the finished set has held a tick; the load is still being judged");
+        SisTick(9000, 3000); SisTick(10000, 3000);
+        CHECK(g_ldVerdict && g_ldEdgeMs == 0, "present: the world built and judged three ticks after the last change, and the load is done with");
+        // A save switch: skipped through its loading screen at 33 ms and on from its edge at 100, the counts kept
+        // across the two; the game window's background seconds counted on both.
+        g_tLoad = 1; SisTick(20000, 3000);
+        CHECK(g_presentSkip == 1 && g_showMs == PRESENT_SHOW_LOADING_MS && g_skippedPresents == 0, "present: a save switch's loading screen is skipped (the count starts at its rise)");
+        g_tLoad = 0; g_tRt0 = 63ull << 20; InterlockedExchange(&g_skippedPresents, 7); SisTick(21000, 3000);
+        CHECK(g_presentSkip == 1 && g_showMs == PRESENT_SHOW_MS && g_skippedPresents == 7, "present: and on from its edge, the count kept");
+        for (int i = 22; i <= 30; i++) SisTick(i * 1000, 3000);                              // the first stage holds: 9 steady ticks
+        CHECK(g_presentSkip == 1 && !g_ldVerdict, "present: the first stage holding 9 ticks: still skipping");
+        for (int i = 31; i <= 36; i++) SisTick(i * 1000, 3000);                              // 15 s: the stage still holds
+        CHECK(g_presentSkip == 0 && !g_ldVerdict, "present: at %d steady ticks the skip ends whatever the set (a build this slow is not paced by presents)", SKIP_MAX_STEADY);
         g_tRt0 = 799ull << 20; SisTick(37000, 3000); SisTick(38000, 3000); SisTick(39000, 3000);
-        CHECK(g_presentImmediate == 1, "present: the targets changed at 16 s: held while they settle");
+        CHECK(g_presentSkip == 0 && !g_ldVerdict, "present: the targets changed at 16 s: the skip stays ended while they settle");
         SisTick(40000, 3000);
-        CHECK(g_presentImmediate == 0 && g_ldVerdict && g_loadBuildS == 16, "present: handed back once they have held 3 ticks (a 16 s build: %lld s)", g_loadBuildS);
-        // A load's flag going up mid-hold drops the flag until the new edge.
+        CHECK(g_ldVerdict && g_loadBuildS == 16 && g_ldEdgeMs == 0, "present: judged once they have held 3 ticks (a 16 s build: %lld s)", g_loadBuildS);
+        // A new load's flag going up mid-build: the timed load is dropped and its loading screen skipped at its own rate.
         g_tLoad = 1; SisTick(41000, 3000); g_tLoad = 0; g_tRt0 = 63ull << 20; SisTick(42000, 3000);
         g_tLoad = 1; SisTick(43000, 3000);
-        CHECK(g_presentImmediate == 0 && g_ldEdgeMs == 0, "present: a new load's flag going up mid-build hands VSync back at once");
-        g_swapVtblHooked = NULL; g_tLoad = 0; g_presentImmediate = 0;
+        CHECK(g_presentSkip == 1 && g_showMs == PRESENT_SHOW_LOADING_MS && g_ldEdgeMs == 0, "present: a new load's flag mid-build: the timed load dropped, its loading screen skipped");
+        g_tLoad = 0;
+        // A set that never reads as finished (final at the edge, no first stage seen, under 128 MB): the skip ends at
+        // SKIP_MAX_STEADY ticks past the last change, not at the 45 s the sizing waits.
+        g_tLoad = 0; TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_swapVtblHooked = g_tSwapVtbl;
+        g_tRt0 = 112ull << 20; SisTick(1000, 3000);
+        for (int i = 2; i <= 10; i++) SisTick(i * 1000, 3000);
+        CHECK(g_presentSkip == 1, "present: a 112 MB set with nothing smaller seen: still skipping at 9 steady ticks");
+        SisTick(11000, 3000);
+        CHECK(g_presentSkip == 0, "present: and no longer at %d", SKIP_MAX_STEADY);
+        // A middle stage at the edge (156 MB at 4K, run S2): a first-seen set of 128 MB or more needs two held ticks,
+        // and a larger set after it one, so the skip outlasts the build's last stage.
+        g_tLoad = 0; TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_swapVtblHooked = g_tSwapVtbl;
+        g_tRt0 = 156ull << 20; SisTick(1000, 3000); SisTick(2000, 3000);
+        CHECK(g_presentSkip == 1, "present: a 156 MB set first seen and held one tick: still skipping");
+        g_tRt0 = 770ull << 20; SisTick(3000, 3000);
+        CHECK(g_presentSkip == 1, "present: the finished set appeared: skipping until it has held a tick");
+        SisTick(4000, 3000);
+        CHECK(g_presentSkip == 0, "present: it held: presents go out again");
+        g_tLoad = 0; TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_swapVtblHooked = g_tSwapVtbl;
+        g_tRt0 = 797ull << 20; SisTick(1000, 3000); SisTick(2000, 3000);
+        CHECK(g_presentSkip == 1, "present: a finished set already at the edge (a fast machine): held one tick, still skipping");
+        SisTick(3000, 3000);
+        CHECK(g_presentSkip == 0, "present: two ticks: presents go out again");
+        // The worker's side of the end: set at the edge from the set seen there, off on a loading screen, off where the
+        // world's set already existed (a save switch), and the hook's end logged on the next tick.
+        g_tLoad = 0; TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_swapVtblHooked = g_tSwapVtbl;
+        g_tLoad = 1; TPlayerInWorld(false); SisTick(1000, 3000);
+        CHECK(g_skipRtEnd == 0, "present: no render-target end on a loading screen");
+        g_tLoad = 0; TPlayerInWorld(true); g_tRt0 = 63ull << 20; SisTick(2000, 3000);
+        CHECK(g_presentSkip == 1 && g_skipRtEnd == 126, "present: at the edge with the 63 MB set the world's is anything from 126 MB (%ld)", g_skipRtEnd);
+        InterlockedExchange(&g_presentSkip, 0); InterlockedExchange(&g_skipEndedRt, 765); g_tRt0 = 765ull << 20; SisTick(3000, 3000);
+        CHECK(g_skipEndedRt == 0 && g_presentSkip == 0, "present: the hook's end is logged on the next tick and not undone");
+        g_tLoad = 1; SisTick(20000, 3000); g_tLoad = 0; SisTick(21000, 3000);
+        CHECK(g_presentSkip == 1 && g_skipRtEnd == 0, "present: a save switch's edge with the world's 765 MB set already there: the worker's rule, not the hook's");
+        g_tLoad = 0; TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_swapVtblHooked = g_tSwapVtbl; g_tRt0 = 156ull << 20; SisTick(1000, 3000);
+        CHECK(g_skipRtEnd == 312, "present: the 156 MB set left by the menu: the world's is anything from 312 MB (%ld)", g_skipRtEnd);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_swapVtblHooked = g_tSwapVtbl; g_tRt0 = 5ull << 20; SisTick(1000, 3000);
+        CHECK(g_skipRtEnd == RT_FINISHED_MIN_MB, "present: a Deck's 5 MB set: the world's is anything from %d MB (%ld)", RT_FINISHED_MIN_MB, g_skipRtEnd);
+        g_swapVtblHooked = NULL; g_tLoad = 0; g_presentSkip = 0; g_skipRtEnd = 0;
 
         // A render-target set under 24 MB is never a finished one, however long it holds (the Deck's first stage is 5 MB
         // and held past 45 s): not sized against, no verdict; the finished set after it is sized as usual.
@@ -1348,14 +1360,15 @@ static void CoreTests() {
         CHECK(g_sized && g_sizedT == 3000, "wine: another mod's 3000 in the table stands above the cap (%d)", g_sizedT);
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tAddrSpace.largest = 2500ull << 20; g_tAddrSpace.total = 2600ull << 20; g_tAddrSpace.blocks = 2;
         TSizeSettle(1000, 3000);
-        CHECK(g_sized && g_sizedT == 4000 && g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 128 && !strstr(g_sizeNote, "most SISCO asks") && strstr(g_sizeNote, "the largest 2500 MB"),
+        CHECK(g_sized && g_sizedT == 4000 && g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 192 && !strstr(g_sizeNote, "most SISCO asks") && strstr(g_sizeNote, "the largest 2500 MB"),
               "wine: a desktop Linux layout with a 2500 MB block is sized as Windows is, with the Windows lines, and logged (%d): %s", g_sizedT, g_sizeNote);
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tAddrSpace.largest = 1023ull << 20; g_tAddrSpace.total = 2000ull << 20; g_tAddrSpace.blocks = 5;
         TSizeSettle(1000, 3000);
         CHECK(g_sized && g_sizedT == WINE_BUDGET_MAX_MB && g_brakeCfg.holdMb == 511, "wine: one MB under the roomy line is still capped, with the lines from the block (%d, hold %d)", g_sizedT, g_brakeCfg.holdMb);
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
-        CHECK(g_sized && g_sizedT == 4000 && g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 128 && !strstr(g_sizeNote, "address space") && !strstr(g_sizeNote, "on Wine"),
-              "wine: on Windows nothing of this applies: 4000, the measured lines, no layout on the line");
+        CHECK(g_sized && g_sizedT == 4000 && g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 192 && !strstr(g_sizeNote, "address space") && !strstr(g_sizeNote, "on Wine")
+              && strstr(g_sizeNote, "; pool managed (read back from the game)"),
+              "wine: on Windows nothing of this applies: 4000, the measured lines, no layout on the line, and the pool named managed: %s", g_sizeNote);
         // The settle boundary itself: not one tick early, sized exactly at SETTLE_TICKS steady ticks.
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
         for (int i = 0; i < SETTLE_TICKS; i++) SisTick(1000 + i * 1000, 3000);   // the first tick only records
@@ -1454,7 +1467,7 @@ static void CoreTests() {
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
         SiteSet(S_VSTRUCT, ST_OFF_MISMATCH, "site bytes differ");
         TSizeSettle(1000, 3000);
-        CHECK(g_sized && g_sizedT == T_MAX_MB && g_tVeh == CAR_NO_POOL && g_tPed == CARPED_FULL
+        CHECK(g_sized && g_sizedT == T_MAX_MB && g_tVeh == CAR_NO_POOL && g_tPed == PED_FULL
               && strstr(g_sizeNote, "VehicleStruct pool can use it"),
               "world: the VehicleStruct raise was refused: car held at %u MB, ped still %u MB", g_tVeh / 1000000, g_tPed / 1000000);
         SiteSet(S_VSTRUCT, ST_ON, "");
@@ -1476,7 +1489,7 @@ static void CoreTests() {
               "world: an -availablevidmem above the card's own figure is not a bound: %d MB", g_sizedT);
 
         TSizeReset(1, 3895, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
-        CHECK(g_sizedT >= 1650 && g_sizedT <= 1665 && g_tVeh == CarPedFor(CAR_STOCK, g_sizedT, TStockFloor(2)) && g_tPed == CarPedFor(PED_STOCK, g_sizedT, TStockFloor(2))
+        CHECK(g_sizedT >= 1650 && g_sizedT <= 1665 && g_tVeh == CarPedFor(CAR_STOCK, CAR_FULL, g_sizedT, TStockFloor(2)) && g_tPed == CarPedFor(PED_STOCK, PED_FULL, g_sizedT, TStockFloor(2))
               && g_tVeh > CAR_STOCK && g_tVeh < 200000000u, "world: a 4 GB card at 4K: budget %d, car %u, ped %u", g_sizedT, g_tVeh, g_tPed);
     }
     // ---- the Complete Edition's shapes. Everything SISCO does differently there is installed on code shaped as CE's
@@ -1606,33 +1619,6 @@ static void CoreTests() {
         g_tD3DVtbl[16] = (void*)FakeCreateDevice; g_d3dVtblHooked = NULL; g_oCreateDevice = NULL;   // this create() hooked the writable fake
         g_managedOn = false; g_dxvkVer[0] = g_dxvkVer[1] = g_dxvkVer[2] = -1;
     }
-    // ---- DXVK's config, parsed as DXVK 3.1 parses it: the keys its D3D9 reads, the exe's own section, a later line
-    // wins, and the DXVK_CONFIG variable's ';' lines over the file
-    {
-        DxvkConf dc;
-        auto fresh = [&]() { dc.d3d9Cap = dc.dxvkCap = dc.interval = CONF_UNSET; dc.d3d9CapFrom = dc.dxvkCapFrom = dc.intervalFrom = ""; };
-        const char* t1 = "# a comment\r\nd3d9.maxFrameRate = 60\r\n  d3d9.presentInterval=\"1\"   # trailing\r\ndxgi.maxFrameRate = 30\r\n";
-        fresh(); DxvkConfParse(t1, strlen(t1), '\n', "GTAIV.exe", "dxvk.conf", &dc);
-        CHECK(dc.d3d9Cap == 60 && dc.interval == 1 && dc.dxvkCap == CONF_UNSET && strcmp(dc.d3d9CapFrom, "dxvk.conf") == 0,
-              "dxvkconf: the two keys read, quotes and comments ignored, dxgi.maxFrameRate not a D3D9 key (%d, %d)", dc.d3d9Cap, dc.interval);
-        const char* t2 = "d3d9.maxFrameRate = 60\n[GTAIV.exe]\nd3d9.maxFrameRate = 30\n[EFLC.exe]\nd3d9.maxFrameRate = 20\nd3d9.presentInterval = 1\n";
-        fresh(); DxvkConfParse(t2, strlen(t2), '\n', "GTAIV.exe", "dxvk.conf", &dc);
-        CHECK(dc.d3d9Cap == 30 && dc.interval == CONF_UNSET, "dxvkconf: the exe's own section wins over the global line, another exe's section is skipped (%d)", dc.d3d9Cap);
-        fresh(); DxvkConfParse(t2, strlen(t2), '\n', "gtaiv.exe", "dxvk.conf", &dc);
-        CHECK(dc.d3d9Cap == 60, "dxvkconf: the section name is matched exactly, as DXVK matches it (%d)", dc.d3d9Cap);
-        const char* t3 = "dxvk.maxFrameRate = -1\nd3d9.maxFrameRate = 60\nd3d9.maxFrameRate = abc\nd3d9.presentInterval = +1\n";
-        fresh(); DxvkConfParse(t3, strlen(t3), '\n', "GTAIV.exe", "dxvk.conf", &dc);
-        CHECK(dc.dxvkCap == -1 && dc.d3d9Cap == CONF_UNSET && dc.interval == CONF_UNSET,
-              "dxvkconf: a negative value is read; a later value that is not DXVK's integer unsets the key, as DXVK then falls back (%d, %d, %d)", dc.dxvkCap, dc.d3d9Cap, dc.interval);
-        const char* t4 = "d3d9.maxFrameRate=144;d3d9.presentInterval = 2";
-        DxvkConfParse(t4, strlen(t4), ';', "GTAIV.exe", "DXVK_CONFIG", &dc);
-        CHECK(dc.d3d9Cap == 144 && dc.interval == 2 && strcmp(dc.d3d9CapFrom, "DXVK_CONFIG") == 0, "dxvkconf: the variable's lines apply over the file's (%d, %d)", dc.d3d9Cap, dc.interval);
-        const char* t5 = "[GTAIV.exe\nd3d9.maxFrameRate = 30\n";
-        fresh(); DxvkConfParse(t5, strlen(t5), '\n', "GTAIV.exe", "dxvk.conf", &dc);
-        CHECK(dc.d3d9Cap == CONF_UNSET, "dxvkconf: a section line with no closing bracket names nothing, as in DXVK, so the lines after it are off");
-        fresh(); DxvkConfParse("", 0, '\n', "GTAIV.exe", "dxvk.conf", &dc);
-        CHECK(dc.d3d9Cap == CONF_UNSET && dc.interval == CONF_UNSET, "dxvkconf: nothing from nothing");
-    }
     // ---- Wine is asked of the process once (this one is Windows), and the address-space walk answers with real figures
     {
         g_tWine = -1; g_wine = -1;
@@ -1646,22 +1632,229 @@ static void CoreTests() {
         CHECK(!n[0], "wine: no layout note on Windows");
         g_tWine = 1; AddrSpaceNote(n, sizeof(n)); g_tWine = 0;
         CHECK(strstr(n, "; address space ") && strstr(n, "the largest"), "wine: and one on Wine: %s", n);
-        g_brakeCfg.holdMb = 512; g_brakeCfg.emergencyMb = 128; BrakeWineLines(2000);
-        CHECK(g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 128, "wine: a large block at sizing leaves the Windows lines");
+        g_brakeCfg.holdMb = BRAKE_HOLD_MB; g_brakeCfg.emergencyMb = BRAKE_EMERGENCY_MB; BrakeWineLines(2000);
+        CHECK(g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 192, "wine: a large block at sizing leaves the Windows lines, 512 and 192 as BRAKEN2 ran them");
         BrakeWineLines(0);
         CHECK(g_brakeCfg.holdMb == 512, "wine: no block measured leaves them too");
     }
-    // ---- the frame counter is read only while the add that advances it is where SISCO expects it, its operand rebased
+    // ---- the engine-sound slots, raised: the slot file, the gate, the writes all or nothing, the proof and the peak
     {
-        static uint32_t ctr; static uint8_t inc[7] = { 0x83, 0x05, 0, 0, 0, 0, 0x01 };
-        uint32_t a = (uint32_t)(uintptr_t)&ctr; memcpy(inc + 2, &a, 4);
-        CoreSites c = {}; c.frameCounter = (uintptr_t)&ctr; c.frameInc = (uintptr_t)inc;
-        PinFrameCounter(c);
-        CHECK(c.frameCounter == (uintptr_t)&ctr, "frame: the counter is kept when the add that advances it reads it");
-        inc[6] = 0x02; PinFrameCounter(c);
-        CHECK(c.frameCounter == 0, "frame: and dropped when the instruction differs");
-        inc[6] = 0x01; c.frameCounter = (uintptr_t)&ctr; c.frameInc = 0; PinFrameCounter(c);
-        CHECK(c.frameCounter == 0, "frame: and dropped where the build has no add to check (the Complete Edition)");
+        // The file: CRLF, a slot of size 108,713,984 standing for the stock file's rest (its block is 120,633,344 with the
+        // 15 engine slots: 126 MiB exactly with the margin), a TEST slot big enough to break the heap if it were counted,
+        // and engine slots 1 to 15 but 14 (a gap: the game stops at 13).
+        static char wf[16384]; size_t wn = 0;
+        wn += sprintf_s(wf + wn, sizeof(wf) - wn, "<WaveSlots>\r\n  <Slot>\r\n    <Name content=\"ascii\">REST</Name>\r\n    <MaxHeaderSize value=\"2048\" />\r\n"
+                        "    <LoadType content=\"ascii\">BANK</LoadType>\r\n    <Size value=\"108713984\" />\r\n  </Slot>\r\n");
+        wn += sprintf_s(wf + wn, sizeof(wf) - wn, "  <Slot>\r\n    <Name content=\"ascii\">TEST</Name>\r\n    <Size value=\"200000000\" />\r\n  </Slot>\r\n");
+        for (int k = 1; k <= 15; k++) if (k != 14)
+            wn += sprintf_s(wf + wn, sizeof(wf) - wn, "  <Slot>\r\n    <Name content=\"ascii\">STREAM_ENGINE_%d</Name>\r\n    <Size value=\"794624\" />\r\n  </Slot>\r\n", k);
+        wn += sprintf_s(wf + wn, sizeof(wf) - wn, "</WaveSlots>\r\n");
+        static char wo[65536];
+        WaveBuild wb = WaveslotsBuild(wf, wn, ENGINE_SLOTS, wo, sizeof(wo));
+        CHECK(wb.ok && wb.before == 13 && wb.after == 48 && wb.added == 34, "engine: the file: 13 loaded before (the gap at 14), 48 after, 34 added (%d %d %d): %s", wb.before, wb.after, wb.added, wb.why);
+        CHECK(wb.heapBytes == 152u << 20, "engine: the heap for 48 over the stock rest is 152 MiB, TEST left out (%u MiB)", wb.heapBytes >> 20);
+        wo[wb.outN] = 0;
+        CHECK(strstr(wo, ">STREAM_ENGINE_14</Name>") && strstr(wo, ">STREAM_ENGINE_48</Name>") && !strstr(wo, "STREAM_ENGINE_49") && !memcmp(wo, wf, 64)
+              && strstr(wo, "<Size value=\"794624\" />\r\n  </Slot>\r\n</WaveSlots>\r\n") && wb.outN > wn,
+              "engine: the gap and 16 to 48 added before the closing tag, in the file's CRLF, the rest untouched");
+        WaveBuild w15 = WaveslotsBuild(wf, wn, 15, wo, sizeof(wo));
+        CHECK(w15.ok && w15.after == 15 && w15.added == 1 && w15.heapBytes == AUDIO_HEAP_STOCK, "engine: asked for 15 on the stock rest: 126 MiB, the heap untouched (%u MiB)", w15.heapBytes >> 20);
+        // Refusals: a name declared twice (the game refuses it too), no closing tag, a heap past 256 MiB.
+        static char bad[20000]; memcpy(bad, wf, wn); bad[wn] = 0;
+        char* dupAt = strstr(bad, "STREAM_ENGINE_2<"); memcpy(dupAt, "STREAM_ENGINE_1<", 16);
+        WaveBuild wd = WaveslotsBuild(bad, wn, ENGINE_SLOTS, wo, sizeof(wo));
+        CHECK(!wd.ok && strstr(wd.why, "STREAM_ENGINE_1 twice"), "engine: a duplicate name is refused: %s", wd.why);
+        memcpy(bad, wf, wn); memcpy(strstr(bad, "</WaveSlots>"), "</WaveSlotz>", 12);
+        WaveBuild wc = WaveslotsBuild(bad, wn, ENGINE_SLOTS, wo, sizeof(wo));
+        CHECK(!wc.ok, "engine: a file with no closing tag is refused: %s", wc.why);
+        memcpy(bad, wf, wn); memcpy(strstr(bad, "108713984"), "308713984", 9);
+        WaveBuild wh = WaveslotsBuild(bad, wn, ENGINE_SLOTS, wo, sizeof(wo));
+        CHECK(!wh.ok && strstr(wh.why, "MiB audio heap"), "engine: a file that needs over 256 MiB is refused: %s", wh.why);
+        // LF only: the added slots follow it.
+        static char lf[16384]; size_t ln = 0;
+        for (size_t i = 0; i < wn; i++) if (wf[i] != '\r') lf[ln++] = wf[i];
+        WaveBuild wl = WaveslotsBuild(lf, ln, ENGINE_SLOTS, wo, sizeof(wo)); wo[wl.outN] = 0;
+        CHECK(wl.ok && !strchr(wo, '\r'), "engine: a file in LF gets its slots in LF");
+        // Comments: a slot a modder commented out is not one (the game skips it too), a closing tag in a comment after
+        // the file's own is not the file's, and the comments are copied through as they are.
+        static char cm[20000]; size_t cn = 0;
+        { const char* at = strstr(wf, "</WaveSlots>"); cn = (size_t)(at - wf); memcpy(cm, wf, cn);
+          cn += sprintf_s(cm + cn, sizeof(cm) - cn, "<!--  <Slot>\r\n    <Name content=\"ascii\">STREAM_ENGINE_14</Name>\r\n    <Size value=\"794624\" />\r\n  </Slot>-->\r\n");
+          cn += sprintf_s(cm + cn, sizeof(cm) - cn, "</WaveSlots>\r\n<!-- </WaveSlots> -->\r\n"); }
+        WaveBuild wm = WaveslotsBuild(cm, cn, ENGINE_SLOTS, wo, sizeof(wo)); wo[wm.ok ? wm.outN : 0] = 0;
+        CHECK(wm.ok && wm.before == 13 && wm.added == 34 && wm.heapBytes == 152u << 20,
+              "engine: a slot commented out is not counted: 13 before, 34 added (%d, %d): %s", wm.before, wm.added, wm.why);
+        const char* realClose = wm.ok ? strstr(wo, "</WaveSlots>\r\n<!-- </WaveSlots> -->") : NULL;
+        const char* last = strstr(wo, ">STREAM_ENGINE_48</Name>");
+        CHECK(realClose && last && last < realClose && strstr(wo, "<!--  <Slot>"),
+              "engine: the slots go in before the file's own closing tag, not one in a comment, and the comments stay");
+        memcpy(bad, wf, wn); bad[wn] = 0; memcpy(strstr(bad, "  <Slot>"), " <Slot >", 8);
+        WaveBuild wa = WaveslotsBuild(bad, wn, ENGINE_SLOTS, wo, sizeof(wo));
+        CHECK(!wa.ok && strstr(wa.why, "slot tag"), "engine: a slot tag SISCO cannot read is refused, since the game would load it all the same: %s", wa.why);
+        { char tiny[] = "<a><!-- x --><b/><!-- never closed"; char* lv = XmlLive(tiny, strlen(tiny));
+          CHECK(lv && !strcmp(lv, "<a>          <b/>                 "), "engine: XmlLive blanks every comment and keeps every offset (%s)", lv ? lv : "no memory");
+          if (lv) HeapFree(GetProcessHeap(), 0, lv); }
+
+        // The gate and the writes, on mocks: four references (one per field), the limit, both heaps, the count, the heap
+        // pointer and the path pointer, as the game ships them.
+        static uint8_t mTable[400]; static uint32_t mCount, mHeapPtr, mPath, mSummed; static char mStr[] = "config/waveslots.xml";
+        static uint8_t mLim[3] = { 0x83, 0xF8, 0x19 }, mH1[5] = { 0xBE, 0x00, 0x00, 0xE0, 0x07 }, mH2[5] = { 0xBE, 0x00, 0x00, 0x30, 0x07 };
+        uint8_t* code = (uint8_t*)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        static AudioRef mRefs[4];
+        for (int i = 0; i < 4; i++) {
+            uint8_t* at = code + 16 * i + 2; at[-2] = 0x8B; at[-1] = 0x80;
+            uint32_t d = (uint32_t)(uintptr_t)mTable + 4 * i; memcpy(at, &d, 4);
+            mRefs[i].at = (uint32_t)(uintptr_t)at; mRefs[i].pre[0] = 0x8B; mRefs[i].pre[1] = 0x80; mRefs[i].preN = 2; mRefs[i].field = (uint8_t)(4 * i);
+        }
+        mPath = (uint32_t)(uintptr_t)mStr; mCount = 0; mHeapPtr = 0;
+        CoreSites ec = {};
+        ec.audioCapModRm = 0xF8; ec.audioSlotCap = (uintptr_t)mLim; ec.audioHeap = (uintptr_t)mH1; ec.audioHeapLow = (uintptr_t)mH2;
+        ec.audioSlots = (uintptr_t)&mCount; ec.audioHeapPtr = (uintptr_t)&mHeapPtr; ec.audioTable = (uintptr_t)mTable;
+        ec.audioRefs = mRefs; ec.audioRefN = 4; ec.audioRefShift = 0; ec.wavePath = (uintptr_t)&mPath;
+        static uint8_t mReader[6]; mReader[0] = 0x8B; mReader[1] = 0x15; { uint32_t pa = (uint32_t)(uintptr_t)&mPath; memcpy(mReader + 2, &pa, 4); }
+        ec.waveReader = (uintptr_t)mReader; ec.waveReadPush = 0; g_tTotalRam = 16ull << 30;
+        ec.waveSummed = (uintptr_t)&mSummed; mSummed = 0;
+        char why[120] = "";
+        CHECK(EngineSitesMatch(ec, why, sizeof(why)), "engine: the sites as shipped match: %s", why);
+        EnginePlan ep = {}; ep.ready = true; ep.before = 15; ep.slots = 48; ep.fileSlots = 117; ep.heapBytes = 152u << 20;
+        uint8_t snap[64];
+        code[16 * 2 + 2] ^= 1; memcpy(snap, code, 64);
+        CHECK(!InstallEngineSlots(ec, ep) && !memcmp(snap, code, 64) && mLim[2] == 0x19 && mH1[3] == 0xE0 && mReader[0] == 0x8B
+              && g_site[S_ENGINE].state == ST_OFF_MISMATCH && strstr(g_site[S_ENGINE].note, "another audio mod moved it") && !g_engineOn,
+              "engine: one reference differs: nothing written at all: %s", g_site[S_ENGINE].note);
+        code[16 * 2 + 2] ^= 1;
+        mCount = 15; CHECK(!EngineSitesMatch(ec, why, sizeof(why)) && strstr(why, "too late"), "engine: the game's audio already built: refused: %s", why); mCount = 0;
+        mSummed = 84; CHECK(!EngineSitesMatch(ec, why, sizeof(why)) && strstr(why, "read its slot file"), "engine: the slot file already read: refused: %s", why); mSummed = 0;
+        mLim[2] = 0x40; CHECK(!EngineSitesMatch(ec, why, sizeof(why)) && strstr(why, "slot limit"), "engine: a limit another mod raised: refused: %s", why); mLim[2] = 0x19;
+        mH2[4] = 0x0C; CHECK(!EngineSitesMatch(ec, why, sizeof(why)) && strstr(why, "audio heap"), "engine: a heap another mod raised: refused: %s", why); mH2[4] = 0x07;
+        mReader[0] = 0xE9; CHECK(!EngineSitesMatch(ec, why, sizeof(why)) && strstr(why, "reader differs"), "engine: a slot-file reader another mod hooked: refused: %s", why); mReader[0] = 0x8B;
+        g_tTotalRam = 1ull << 30; CHECK(!EngineSitesMatch(ec, why, sizeof(why)) && strstr(why, "1.4 GB"), "engine: under 1.4 GB of RAM the game's small file stands: %s", why); g_tTotalRam = 16ull << 30;
+        EnginePlan notReady = {}; strcpy_s(notReady.why, "SISCO could not write pc\\audio\\config\\waveslots_sisco.xml");
+        CHECK(!InstallEngineSlots(ec, notReady) && g_site[S_ENGINE].state == ST_OFF_DISABLED && strstr(g_site[S_ENGINE].note, "could not write"), "engine: no file written: nothing moved");
+        CHECK(InstallEngineSlots(ec, ep) && g_engineOn && g_site[S_ENGINE].state == ST_ON && strstr(g_site[S_ENGINE].note, "15 -> 48, audio heap 126 -> 152 MiB"),
+              "engine: the raise goes in: %s", g_site[S_ENGINE].note);
+        bool refsMoved = true;
+        for (int i = 0; i < 4; i++) { uint32_t d = 0; memcpy(&d, code + 16 * i + 2, 4); refsMoved &= d == (uint32_t)(uintptr_t)g_engineTable + 4 * i && code[16 * i] == 0x8B; }
+        uint32_t h1 = 0, h2 = 0; memcpy(&h1, mH1 + 1, 4); memcpy(&h2, mH2 + 1, 4);
+        uint32_t rdImm = 0; memcpy(&rdImm, mReader + 1, 4);
+        CHECK(refsMoved && mLim[2] == 48 && h1 == 152u << 20 && h2 == 152u << 20 && mReader[0] == 0xBA && rdImm == (uint32_t)(uintptr_t)g_waveSiscoPath && mReader[5] == 0x90
+              && mPath == (uint32_t)(uintptr_t)mStr,
+              "engine: every reference points at SISCO's table with its field, the limit is 48, both heaps 152 MiB, the reader hands over waveslots_sisco.xml, the pointer untouched");
+        // The proof on the log, from the count the game resolved, and the peak.
+        mCount = 48; mSummed = 117; g_enginePlan = ep;
+        char an[400]; CoreSites keepCs = g_cs; CoreSites ac = ec; AudioNote(ac, an, sizeof(an));
+        CHECK(strstr(an, "48 engine sound slots of the 48 SISCO declared (the game's own file 15), limit 48; the loader read 117 slots (SISCO's file has 117), audio heap 152 MiB set")
+              && !strstr(an, ": the"), "engine: the audio line: %s", an);
+        mCount = 21; mSummed = 91; AudioNote(ac, an, sizeof(an));
+        CHECK(strstr(an, "the loader read 91 slots") && strstr(an, "the game read another slot file than waveslots_sisco.xml"), "engine: another file read is named as such: %s", an);
+        uint8_t keepRd = mReader[0]; mReader[0] = 0xE9; AudioNote(ac, an, sizeof(an)); mReader[0] = keepRd;
+        CHECK(strstr(an, "the slot file's reader was changed after SISCO set it"), "engine: a reader another mod hooked after SISCO is named as such: %s", an);
+        mSummed = 117; AudioNote(ac, an, sizeof(an));
+        CHECK(strstr(an, "found fewer engine slots in it"), "engine: the right file with too few slots is named as such: %s", an);
+        mSummed = 0;
+        mCount = 48; g_cs.audioSlots = (uintptr_t)&mCount; g_enginePeak = 0; memset(g_engineTable, 0, sizeof(g_engineTable));
+        for (int i = 0; i < 15; i++) *(uint32_t*)(g_engineTable + 16 * i + 8) = 1;
+        EngineSlotTick();
+        CHECK(g_enginePeak == 15, "engine: 15 held: the peak, not over the game's own (%d)", g_enginePeak);
+        for (int i = 15; i < 22; i++) *(uint32_t*)(g_engineTable + 16 * i + 8) = 2;
+        EngineSlotTick();
+        CHECK(g_enginePeak == 22, "engine: 22 held: a new peak over the game's 15 (%d)", g_enginePeak);
+        g_cs = keepCs; memset(g_engineTable, 0, sizeof(g_engineTable)); g_engineOn = false; g_enginePeak = 0;
+        // The Complete Edition's reader pushes the pointer: push [ptr] becomes push imm32 and a NOP.
+        { CoreSites cc = ec; cc.waveReadPush = 1; uint8_t a[6], b2[6]; WaveReaderBytes(cc, false, a); WaveReaderBytes(cc, true, b2);
+          uint32_t pa = 0, pb = 0; memcpy(&pa, a + 2, 4); memcpy(&pb, b2 + 1, 4);
+          CHECK(a[0] == 0xFF && a[1] == 0x35 && pa == (uint32_t)(uintptr_t)&mPath && b2[0] == 0x68 && pb == (uint32_t)(uintptr_t)g_waveSiscoPath && b2[5] == 0x90,
+                "engine: the CE reader, push [ptr], becomes push imm32 and a NOP"); }
+        // driverSettings.xml names the file: the stock value, none, another name, and two refusals.
+        char rel[64], dwhy[120];
+        const char* ds1 = "<DriverSettings>\r\n\t<WaveSlotsConfig value=\"audio:/config/waveslots.xml\"/>\r\n</DriverSettings>";
+        CHECK(DriverWaveslots(ds1, strlen(ds1), rel, sizeof(rel), dwhy, sizeof(dwhy)) && !strcmp(rel, "config\\waveslots.xml"), "engine: driverSettings.xml's stock value is config\\waveslots.xml (%s)", rel);
+        CHECK(DriverWaveslots("<DriverSettings/>", 17, rel, sizeof(rel), dwhy, sizeof(dwhy)) && !strcmp(rel, "config\\waveslots.xml"), "engine: no key: the game's default");
+        CHECK(DriverWaveslots(NULL, 0, rel, sizeof(rel), dwhy, sizeof(dwhy)) && !strcmp(rel, "config\\waveslots.xml"), "engine: no file: the game's default");
+        const char* ds2 = "<WaveSlotsConfig value=\"audio:/config/waveslots_big.xml\"/>";
+        CHECK(DriverWaveslots(ds2, strlen(ds2), rel, sizeof(rel), dwhy, sizeof(dwhy)) && !strcmp(rel, "config\\waveslots_big.xml"), "engine: another name is followed (%s)", rel);
+        const char* ds3 = "<WaveSlotsConfig value=\"platform:/audio/waveslots.xml\"/>";
+        CHECK(!DriverWaveslots(ds3, strlen(ds3), rel, sizeof(rel), dwhy, sizeof(dwhy)) && strstr(dwhy, "outside audio:/"), "engine: a file outside audio:/ is refused: %s", dwhy);
+        const char* ds4 = "<WaveSlotsConfig value=\"audio:/../../x.xml\"/>";
+        CHECK(!DriverWaveslots(ds4, strlen(ds4), rel, sizeof(rel), dwhy, sizeof(dwhy)) && strstr(dwhy, "will not follow"), "engine: a path that climbs out is refused: %s", dwhy);
+        const char* ds5 = "<!--\t<WaveSlotsConfig value=\"audio:/config/waveslots_old.xml\"/>-->\r\n\t<WaveSlotsConfig value=\"audio:/config/waveslots.xml\"/>";
+        CHECK(DriverWaveslots(ds5, strlen(ds5), rel, sizeof(rel), dwhy, sizeof(dwhy)) && !strcmp(rel, "config\\waveslots.xml"),
+              "engine: a WaveSlotsConfig line commented out is not the one followed (%s)", rel);
+        memset(&g_site[S_ENGINE], 0, sizeof(g_site[S_ENGINE]));
+        // The mocks back as the game ships them, for the plan below.
+        for (int i = 0; i < 4; i++) { uint32_t d = (uint32_t)(uintptr_t)mTable + 4 * i; memcpy(code + 16 * i + 2, &d, 4); }
+        mLim[2] = 0x19; { uint32_t a = 0x7E00000u, b = 0x7300000u; memcpy(mH1 + 1, &a, 4); memcpy(mH2 + 1, &b, 4); }
+        mPath = (uint32_t)(uintptr_t)mStr; mCount = 0; mSummed = 0; mReader[0] = 0x8B; mReader[1] = 0x15; { uint32_t pa = (uint32_t)(uintptr_t)&mPath; memcpy(mReader + 2, &pa, 4); }
+        CHECK(EngineSitesMatch(ec, why, sizeof(why)), "engine: the mocks are back as shipped: %s", why);
+
+        // The plan in a folder: the game's own file read and left alone, SISCO's written beside it; FusionFix's update\
+        // copy read when FusionFix is there to serve it; an unchanged file is not rewritten.
+        char td[MAX_PATH] = ""; GetTempPathA(MAX_PATH, td); strcat_s(td, "sisco_engine_test");
+        char d1[MAX_PATH], d2[MAX_PATH], d3[MAX_PATH], f1[MAX_PATH], f2[MAX_PATH], f3[MAX_PATH], u1[MAX_PATH], u2[MAX_PATH], u3[MAX_PATH], u4[MAX_PATH], uf[MAX_PATH], ffp[MAX_PATH], pl[MAX_PATH];
+        sprintf_s(d1, "%s\\pc", td); sprintf_s(d2, "%s\\pc\\audio", td); sprintf_s(d3, "%s\\pc\\audio\\config", td);
+        sprintf_s(f1, "%s\\pc\\audio\\config\\waveslots.xml", td); sprintf_s(f2, "%s\\pc\\audio\\config\\waveslots_sisco.xml", td);
+        sprintf_s(f3, "%s\\pc\\audio\\config\\waveslots_sisco.tmp", td);
+        CreateDirectoryA(td, NULL); CreateDirectoryA(d1, NULL); CreateDirectoryA(d2, NULL); CreateDirectoryA(d3, NULL);
+        auto writeFile = [](const char* path, const char* data, size_t n) { HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL); DWORD w = 0; if (h != INVALID_HANDLE_VALUE) { WriteFile(h, data, (DWORD)n, &w, NULL); CloseHandle(h); } };
+        char dsf[MAX_PATH]; sprintf_s(dsf, "%s\\pc\\audio\\config\\driverSettings.xml", td);
+        writeFile(dsf, ds1, strlen(ds1));
+        writeFile(f1, wf, wn);
+        PlanEngineSlots(ec, td);
+        size_t rn = 0; char* rb = ReadWhole(f2, &rn, 1 << 20); size_t on = 0; char* ob = ReadWhole(f1, &on, 1 << 20);
+        CHECK(g_enginePlan.ready && g_enginePlan.before == 13 && g_enginePlan.slots == 48 && g_enginePlan.fileSlots == 1 + 48 && g_enginePlan.heapBytes == 152u << 20
+              && !strcmp(g_enginePlan.from, "pc\\audio\\config\\waveslots.xml")
+              && rb && strstr(rb, ">STREAM_ENGINE_48</Name>") && ob && on == wn && !memcmp(ob, wf, wn) && !FileIs(f3),
+              "engine: the plan writes waveslots_sisco.xml beside the game's file and leaves the game's alone: %s", g_enginePlan.why);
+        if (rb) HeapFree(GetProcessHeap(), 0, rb); if (ob) HeapFree(GetProcessHeap(), 0, ob);
+        FILETIME t0 = {}, t1 = {}; HANDLE fh = CreateFileA(f2, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL); GetFileTime(fh, NULL, NULL, &t0); CloseHandle(fh);
+        Sleep(20); PlanEngineSlots(ec, td);
+        fh = CreateFileA(f2, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL); GetFileTime(fh, NULL, NULL, &t1); CloseHandle(fh);
+        CHECK(g_enginePlan.ready && CompareFileTime(&t0, &t1) == 0, "engine: an unchanged file is not written again");
+        sprintf_s(u1, "%s\\update", td); sprintf_s(u2, "%s\\update\\pc", td); sprintf_s(u3, "%s\\update\\pc\\audio", td); sprintf_s(u4, "%s\\update\\pc\\audio\\config", td);
+        sprintf_s(uf, "%s\\update\\pc\\audio\\config\\waveslots.xml", td); sprintf_s(pl, "%s\\plugins", td); sprintf_s(ffp, "%s\\plugins\\GTAIV.EFLC.FusionFix.asi", td);
+        CreateDirectoryA(u1, NULL); CreateDirectoryA(u2, NULL); CreateDirectoryA(u3, NULL); CreateDirectoryA(u4, NULL); CreateDirectoryA(pl, NULL);
+        static char upd[20000]; memcpy(upd, wf, wn); memcpy(strstr(upd, ">REST<"), ">UPDR<", 6); writeFile(uf, upd, wn);
+        PlanEngineSlots(ec, td);
+        rb = ReadWhole(f2, &rn, 1 << 20);
+        CHECK(g_enginePlan.ready && !strcmp(g_enginePlan.from, "pc\\audio\\config\\waveslots.xml") && rb && strstr(rb, ">REST<"), "engine: an update\\ file without FusionFix is not read");
+        if (rb) HeapFree(GetProcessHeap(), 0, rb);
+        writeFile(ffp, "", 0);
+        PlanEngineSlots(ec, td);
+        rb = ReadWhole(f2, &rn, 1 << 20);
+        CHECK(g_enginePlan.ready && !strcmp(g_enginePlan.from, "update\\pc\\audio\\config\\waveslots.xml") && rb && strstr(rb, ">UPDR<") && !strstr(rb, ">REST<"),
+              "engine: with FusionFix, its update\\ file is the one SISCO builds from");
+        if (rb) HeapFree(GetProcessHeap(), 0, rb);
+        { char scr[MAX_PATH], ffs[MAX_PATH]; sprintf_s(scr, "%s\\scripts", td); sprintf_s(ffs, "%s\\scripts\\GTAIV.EFLC.FusionFix.asi", td);
+          DeleteFileA(ffp); CreateDirectoryA(scr, NULL); writeFile(ffs, "", 0);
+          writeFile(f1, wf, wn); DeleteFileA(f2);
+          PlanEngineSlots(ec, td);
+          rb = ReadWhole(f2, &rn, 1 << 20);
+          CHECK(g_enginePlan.ready && !strcmp(g_enginePlan.from, "update\\pc\\audio\\config\\waveslots.xml") && rb && strstr(rb, ">UPDR<"),
+                "engine: FusionFix in scripts\\ serves the update folder too: %s", g_enginePlan.from);
+          if (rb) HeapFree(GetProcessHeap(), 0, rb);
+          DeleteFileA(ffs); RemoveDirectoryA(scr); }
+        { char longDir[300]; memset(longDir, 'a', 240); longDir[240] = 0; memcpy(longDir, "C:\\", 3);
+          PlanEngineSlots(ec, longDir);
+          CHECK(!g_enginePlan.ready && strstr(g_enginePlan.why, "too long"),
+                "engine: a game folder whose path leaves no room for the slot file's name is refused before anything is read: %s", g_enginePlan.why); }
+        mCount = 15; PlanEngineSlots(ec, td);
+        CHECK(!g_enginePlan.ready && strstr(g_enginePlan.why, "too late"), "engine: no plan once the game's audio exists: %s", g_enginePlan.why);
+        mCount = 0;
+        // driverSettings.xml naming another file: SISCO builds from that one.
+        char bigf[MAX_PATH]; sprintf_s(bigf, "%s\\pc\\audio\\config\\waveslots_big.xml", td);
+        static char big[20000]; memcpy(big, wf, wn); memcpy(strstr(big, ">REST<"), ">BIGR<", 6); writeFile(bigf, big, wn);
+        writeFile(dsf, ds2, strlen(ds2)); DeleteFileA(ffp);
+        PlanEngineSlots(ec, td);
+        rb = ReadWhole(f2, &rn, 1 << 20);
+        CHECK(g_enginePlan.ready && !strcmp(g_enginePlan.from, "pc\\audio\\config\\waveslots_big.xml") && rb && strstr(rb, ">BIGR<"),
+              "engine: driverSettings.xml's own slot file is the one SISCO builds from (%s): %s", g_enginePlan.from, g_enginePlan.why);
+        if (rb) HeapFree(GetProcessHeap(), 0, rb);
+        DeleteFileA(bigf); DeleteFileA(dsf);
+        DeleteFileA(ffp); DeleteFileA(uf); DeleteFileA(f2); DeleteFileA(f1);
+        RemoveDirectoryA(u4); RemoveDirectoryA(u3); RemoveDirectoryA(u2); RemoveDirectoryA(u1); RemoveDirectoryA(pl);
+        RemoveDirectoryA(d3); RemoveDirectoryA(d2); RemoveDirectoryA(d1); RemoveDirectoryA(td);
+        memset(&g_enginePlan, 0, sizeof(g_enginePlan)); g_tTotalRam = 0;
+        VirtualFree(code, 0, MEM_RELEASE);
     }
     // ---- the engine-sound slots: read and never written, and an install someone else raised is told apart from stock
     {
@@ -1673,7 +1866,9 @@ static void CoreTests() {
         capIns[0] = 0x83; capIns[1] = 0xF8; capIns[2] = 25;
         heapIns[0] = 0xBE; memcpy(heapIns + 1, &heap, 4);
         slotCount = 15;
+        uint8_t keepCap[3], keepHeap[5]; memcpy(keepCap, capIns, 3); memcpy(keepHeap, heapIns, 5);
         char t[200]; AudioNote(c, t, sizeof(t));
+        CHECK(!memcmp(keepCap, capIns, 3) && !memcmp(keepHeap, heapIns, 5), "audio: nothing was written back");
         CHECK(strstr(t, "15 engine sound slots") && strstr(t, "limit 25") && strstr(t, "126 MiB") && strstr(t, "no engine sound"),
               "audio: stock is read as 15 of 25 and what it costs is said: %s", t);
         capIns[2] = 50; slotCount = 50; heap = 160u << 20; memcpy(heapIns + 1, &heap, 4);
@@ -1686,10 +1881,10 @@ static void CoreTests() {
         SitesShapeCe(c);
         AudioNote(c, t, sizeof(t));
         CHECK(strstr(t, "50 engine sound slots"), "audio: the Complete Edition's own register is read: %s", t);
-        uint8_t keep[3]; memcpy(keep, capIns, 3);
-        CHECK(memcmp(keep, capIns, 3) == 0 && heapIns[0] == 0xBE, "audio: nothing was written back");
+        memcpy(keepCap, capIns, 3); memcpy(keepHeap, heapIns, 5); AudioNote(c, t, sizeof(t));
+        CHECK(!memcmp(keepCap, capIns, 3) && !memcmp(keepHeap, heapIns, 5), "audio: nothing was written back on the Complete Edition either");
     }
-    // ---- the install order: native predicted leaves the arena alone; a launch-option reader that differs keeps the
+    // ---- the install order: the arena is always attempted; a launch-option reader that differs keeps the
     // Direct3D hook out. The queue and lock sites are empty here (their installs are tested above); the globals they set
     // are put back.
     {

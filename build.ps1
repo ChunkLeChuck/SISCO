@@ -29,6 +29,9 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $obj = Join-Path $root 'obj'
 New-Item -ItemType Directory -Force $obj | Out-Null
+# The pass stamp package.ps1 requires goes first, and is written again only when every step below has passed.
+$stamp = Join-Path $obj 'SISCO.passed'
+Remove-Item $stamp -ErrorAction SilentlyContinue
 
 # The compiler is found, not assumed: any edition, any year, wherever it was installed.
 $vcvars = $null
@@ -106,6 +109,7 @@ if (Test-Path $list) {
         if ($line -match '^\s*([^#=][^=]*?)\s*=\s*(.+?)\s*$' -and -not $games[$matches[1]]) { $games[$matches[1]] = $matches[2] }
     }
 }
+$sitesChecked = 0
 foreach ($name in @('1.0.8.0', 'the Complete Edition')) {
     $exe = $games[$name]
     if (-not $exe -or -not (Test-Path $exe)) {
@@ -116,12 +120,16 @@ foreach ($name in @('1.0.8.0', 'the Complete Edition')) {
     $r = Invoke-Checker @((Join-Path $root 'tools\sisco_sites_check.py'), $exe, (Join-Path $root 'core\sis_core.h'))
     if ($r.code -ne 0) { $r.out | ForEach-Object { Write-Host $_ }; throw "Site check FAILED for $name. Nothing deployed." }
     Write-Host "  $(@($r.out)[-1])" -ForegroundColor Green
+    $sitesChecked++
 }
 
 Write-Host "Checking no instrument has come back..." -ForegroundColor Cyan
 $r = Invoke-Checker @((Join-Path $root 'tools\sis_release_check.py'), $root)
 if ($r.code -ne 0) { $r.out | ForEach-Object { Write-Host $_ }; throw "Release check FAILED. Nothing deployed." }
 Write-Host "  $(@($r.out)[-1])" -ForegroundColor Green
+
+# Every step passed: the build id, the plugin's SHA256 and how many of the two games' sites were checked.
+Set-Content -Path $stamp -Value ("{0} {1} {2}" -f $buildId, (Get-FileHash $sis -Algorithm SHA256).Hash, $sitesChecked) -Encoding ascii
 
 if ($Deploy) {
     $plugins = Join-Path $Deploy 'plugins'

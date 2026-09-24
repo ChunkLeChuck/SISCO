@@ -54,8 +54,22 @@ $dxvkHash = (Get-FileHash $dxvkDll -Algorithm MD5).Hash
 if ($dxvkHash -ne $dxvkMd5) {
     throw "DXVK x32\d3d9.dll MD5 is $dxvkHash, expected $dxvkMd5. Refusing to package a runtime nobody has checked."
 }
-# The plugin in obj\ must be the one build.ps1 last passed: build.ps1 refuses to leave a failing build there,
-# but a stale obj\ from an edited source would still be older than the source. Refuse that too.
+# The plugin in obj\ must be one build.ps1 passed in full. build.ps1 compiles into obj\ before its tests and checks, so
+# a failed build can sit there; it writes obj\SISCO.passed only once every step has passed, naming the build, the
+# plugin's SHA256 and how many of the two games' sites were checked. For an upload (no -Label) the build must be a
+# clean commit checked against both games.
+$passed = Join-Path $root 'obj\SISCO.passed'
+if (-not (Test-Path $passed)) { throw "obj\SISCO.passed is missing: run build.ps1 and let every step pass." }
+$stampParts = (Get-Content $passed -Raw).Trim() -split ' '
+if ($stampParts.Count -ne 3 -or $stampParts[1] -ne (Get-FileHash $asi -Algorithm SHA256).Hash) {
+    throw "obj\SISCO.asi is not the plugin build.ps1 last passed. Run build.ps1 again."
+}
+if (-not $Label) {
+    if ($stampParts[0] -like '*-dirty') { throw "build $($stampParts[0]) has uncommitted changes: commit and build again, or give -Label for a test zip." }
+    if ($stampParts[2] -ne '2') { throw "only $($stampParts[2]) of the two games' sites were checked: point games.txt at both, or give -Label for a test zip." }
+}
+Write-Host ("  build {0} passed every step; {1} of the two games' sites checked" -f $stampParts[0], $stampParts[2]) -ForegroundColor Green
+# And a stale obj\ from a source edited after that build would be older than the source.
 $newestSource = Get-ChildItem (Join-Path $root 'core'), (Join-Path $root 'SIS') -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ((Get-Item $asi).LastWriteTime -lt $newestSource.LastWriteTime) {
     throw ("obj\SISCO.asi is older than {0}. Run build.ps1 first." -f $newestSource.Name)
@@ -84,13 +98,41 @@ $text = [regex]::Replace($text, '(?s)## Building\r?\n.*?(?=## Licence)', '')
 if ($text -match 'github|repositor|build\.ps1|## Building|## Layout') { throw "README.txt for the zip still mentions the repository." }
 [IO.File]::WriteAllText((Join-Path $stage 'README.txt'), $text, (New-Object System.Text.UTF8Encoding($false)))
 
+# THE ARCHIVE'S PATHS ARE FORWARD SLASHES (2026-09-24). Compress-Archive writes "plugins\SISCO.asi" with a backslash,
+# which Windows reads as a folder and which some Linux archive tools keep as a literal character in a file name, so a
+# Steam Deck player extracting by hand gets a file called "plugins\SISCO.asi" beside GTAIV.exe and no plugin loaded.
+# DLSS-IV met exactly that on a Deck (2026-09-21) and writes its entries by hand; so does this, the same way: in name
+# order, the zip format's own separator, the same compression level. Every zip before 1.0.3 had the backslashes.
+function Write-ForwardSlashZip([string]$sourceDir, [string]$zipPath) {
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $root = (Resolve-Path $sourceDir).Path.TrimEnd('\') + '\'
+    $files = Get-ChildItem -Path $sourceDir -Recurse -File | Sort-Object FullName
+    $fs = [System.IO.File]::Open($zipPath, [System.IO.FileMode]::CreateNew)
+    try {
+        $archive = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($f in $files) {
+                $entryName = $f.FullName.Substring($root.Length).Replace('\', '/')
+                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $f.FullName, $entryName,
+                    [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+            }
+        } finally { $archive.Dispose() }
+    } finally { $fs.Dispose() }
+}
+
 $zip = Join-Path $dist ($name + '.zip')
 if (Test-Path $zip) { Remove-Item $zip -Force }
-Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
+Write-ForwardSlashZip $stage $zip
 Remove-Item $stage -Recurse -Force
 
 Write-Host ("  DXVK 3.1.1 verified: {0:N0} bytes, MD5 {1}; shipped as vulkan.dll" -f $dxvkItem.Length, $dxvkHash) -ForegroundColor Green
 Write-Host ("  {0}  ({1:N0} bytes)" -f $zip, (Get-Item $zip).Length) -ForegroundColor Green
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
-try { foreach ($e in $archive.Entries) { Write-Host ("    {0,10:N0}  {1}" -f $e.Length, $e.FullName) } } finally { $archive.Dispose() }
+try {
+    foreach ($e in $archive.Entries) {
+        if ($e.FullName.Contains('\')) { throw "zip entry '$($e.FullName)' has a backslash: a Linux extractor would make it one file name." }
+        Write-Host ("    {0,10:N0}  {1}" -f $e.Length, $e.FullName)
+    }
+} finally { $archive.Dispose() }

@@ -1,22 +1,24 @@
 // sis_core.h: SISCO, the Streaming Issue Solver: Crash Override, for GTA IV 1.0.8.0 and the Complete Edition.
 //
 // Everything the mod does is in this file. SIS.cpp builds it into the .asi and adds a log and a once-a-second worker;
-// sis_core_tests.h is the harness, and it is compiled into the same build, so what the tests exercise is the code that
-// ships. One translation unit: this header holds definitions, not just declarations.
+// sis_core_tests.h is the harness, compiled by the same build with the release's own flags into a test exe, so what
+// the tests exercise is the code that ships. One translation unit: this header holds definitions, not declarations.
 //
 // What it does:
 //  - the release-queue fix: the game's 65,536-entry release queue has no bounds check;
 //  - the link-pool lock fix: the game's own eviction takes a spinlock it already holds, which is the freeze;
 //  - the native-table race fix, which is FusionFix's startup crash;
 //  - the drawable-slot and link pools raised before the game builds them, because a link pool that runs dry crashes;
-//  - the VehicleStruct pool from 50 to 100;
-//  - with DXVK only: the streaming arena to 400 MiB, -managed and the card's real video memory given to the game, the
-//    budget sized to the card, the car and ped budgets raised, and the address-space brake.
-// Without DXVK the game keeps its own budget, its own arena and its own traffic, and only the list above it applies.
-// That path has not been measured: everything here was worked out and run under DXVK.
+//  - the VehicleStruct pool from 50 to 100, and the streaming arena to 400 MiB;
+//  - the engine-sound slots from the game's 15 to 48, declared in a file of SISCO's own in pc\audio\config;
+//  - with DXVK only: -managed and the card's real video memory given to the game, the budget sized to the card, the
+//    car and ped budgets raised, presents skipped while a load is in progress, and the address-space brake.
+// Without DXVK the game keeps its own budget and its own traffic, and only the list above it applies. That path has
+// not been measured: everything here was worked out and run under DXVK.
 //
 // A map of this file: the addresses and what was read at each, then the small primitives that patch and read them,
-// then the three fixes, the launch-time sizes, the budget and the brake, the once-a-second tick, and the install.
+// then the three fixes, the launch-time settings, the Direct3D hooks and the present skip, the budget and the brake,
+// the engine-sound slots, the sizing and the once-a-second tick, and the install.
 // Quantities, used throughout: T the streaming budget, X the render targets, O everything else the card holds,
 // B the card's budget for this process, V the video memory the game is holding, L the largest free block of the
 // 32-bit address space. All in MB unless a name says otherwise.
@@ -33,7 +35,7 @@
 #ifndef SISCO_BUILD
 #define SISCO_BUILD "dev"
 #endif
-#define SIS_VERSION "1.0.2"
+#define SIS_VERSION "1.0.3"
 
 // ---------------------------------------------------------------------------------------------
 // Addresses (1.0.8.0 VA, image base 0x400000), rebased at run time. SITE lines are checked against GTAIV.exe on disk
@@ -144,8 +146,6 @@
 #define D_SET_VIEW      0x10FC304u  // the graphics sliders the player runs at, logged so a report carries them
 #define D_SET_DETAIL    0x10FC308u
 #define D_SET_CARS      0x10FC30Cu
-#define D_FRAME         0x10FCC30u  // the game's frame counter: read for the build's frame rate on the load line
-#define A_FRAME_INC     0x7CC1DCu   // add dword ptr [D_FRAME], 1: the counter is read only while this is what advances it
 #define D_POOL_MODE     0x18CACE0u  // 0 unmanaged, 1 D3D-runtime managed: the block at 0x406A3F, last write wins
 #define A_MEMRESTRICT_TEST 0x40F152u  // cmp [nomemrestrict], 0 / jne row15: FusionFix forces this branch (ExtraStreamingMemory off)
 #define D_PARAM_NOMEMRESTRICT 0x10AAB78u   // the -nomemrestrict slot the test reads
@@ -161,16 +161,25 @@
 #define D_LOADING       0x18CB06Cu  // byte: the loading screen is up
 #define D_VEH_BUDGET    0xF49B98u   // car model budget, bytes; read live by the traffic code (0xA41FED, 0xA41310)
 #define D_PED_BUDGET    0xF49B94u   // ped model budget, bytes; read live (0xA42014)
-// The engine-sound slots, read and never written. 0x825490 fills a table by asking the audio config for
-// STREAM_ENGINE_1, _2 and so on until one is not declared, at most the 25 in its own loop; the game then plays one
-// looping engine sound per distinct vehicle model near the player, out of those slots. Stock GTA IV declares 15 of them
-// in pc\audio\config\waveslots.xml, so that is the real ceiling, and a raised car budget is what makes it reachable.
+// The engine-sound slots (InstallEngineSlots). 0x825490 fills a table by asking the audio config for STREAM_ENGINE_1,
+// _2 and so on until one is not declared, at most the 25 in its own loop; the game then gives each engine sound bank
+// near the player one of those slots. Stock GTA IV declares 15 in pc\audio\config\waveslots.xml.
 // SITE bytes  AudioSlotCap  0x8254D2  83 F8 19
 // SITE bytes  AudioHeap     0x7BC4EC  BE 00 00 E0 07
-// SITE bytes  FrameInc      0x7CC1DC  83 05 30 CC 0F 01 01
+// SITE bytes  AudioHeapLow  0x7BC503  BE 00 00 30 07
+// SITE bytes  WaveReader    0x78EC4D  8B 15 60 D1 F2 00
+// SITE bytes  WaveSumInc    0x78ED08  83 05 7C E4 0E 01 01
 #define A_AUDIO_SLOT_CAP 0x8254D2u  // cmp eax, 0x19: the loop's own limit, the imm8 at +2
 #define A_AUDIO_HEAP    0x7BC4ECu   // mov esi, 0x7E00000: the audio heap the slots are carved from, the imm32 at +1
+#define A_AUDIO_HEAP_LOW 0x7BC503u  // mov esi, 0x7300000: the same on a machine with little RAM
 #define D_AUDIO_SLOTS   0x117B200u  // how many the loop resolved
+#define D_AUDIO_TABLE   0x117B070u  // the 25 slots, 16 bytes each (the count follows directly): moved into SISCO
+#define D_AUDIO_HEAP_PTR 0x10F5594u // the audio heap once allocated: 0 until the game's audio exists
+#define D_WAVE_PATH     0xF2D160u   // the slot file's name: +0x18 of the audio config at 0xF2D148, which 0x78FC40 points at
+                                    // driverSettings.xml's WaveSlotsConfig value (or at waveslot_.xml under 1.4 GB of RAM)
+#define A_WAVE_READER   0x78EC4Du   // mov edx, [D_WAVE_PATH]: the loader's one read of it, right after that
+#define A_WAVE_SUM_INC  0x78ED08u   // add dword ptr [D_WAVE_SUMMED], 1: once per slot but TEST as the loader sums the heap
+#define D_WAVE_SUMMED   0x10EE47Cu  // so the number of slots in the file the game read: 0 until it has read one
 
 // ---------------------------------------------------------------------------------------------
 // The Complete Edition (1.2.0.59, TimeDateStamp 0x63D3E735). Same game, recompiled: every address moved and a few
@@ -289,9 +298,19 @@
 #define CE_D_PED_BUDGET    0x10496D8u
 // CESITE bytes  AudioSlotCap  0x98D50D  83 FF 19
 // CESITE bytes  AudioHeap     0x8C158B  BE 00 00 E0 07
+// CESITE bytes  AudioHeapLow  0x8C15A2  BE 00 00 30 07
+// CESITE bytes  WaveReader    0x8883B7  FF 35 C0 00 03 01
+// CESITE bytes  WaveSumInc    0x88848B  FF 05 68 A4 15 01
 #define CE_A_AUDIO_SLOT_CAP 0x98D50Du   // cmp edi, 0x19: the same loop, counting in another register
 #define CE_A_AUDIO_HEAP    0x8C158Bu
+#define CE_A_AUDIO_HEAP_LOW 0x8C15A2u
 #define CE_D_AUDIO_SLOTS   0x1283298u
+#define CE_D_AUDIO_TABLE   0x12832B8u
+#define CE_D_AUDIO_HEAP_PTR 0x1162538u
+#define CE_D_WAVE_PATH     0x10300C0u
+#define CE_A_WAVE_READER   0x8883B7u    // push dword ptr [CE_D_WAVE_PATH]
+#define CE_A_WAVE_SUM_INC  0x88848Bu   // inc dword ptr [CE_D_WAVE_SUMMED]
+#define CE_D_WAVE_SUMMED   0x115A468u
 
 // ---------------------------------------------------------------------------------------------
 // Basics
@@ -353,12 +372,12 @@ static const char* StName(int s) {
 }
 enum { S_PUSH, S_PUSH_IN1, S_PUSH_IN2, S_PUSH_IN3, S_PUSH_IN4, S_DRAIN1, S_DRAIN2, S_DRAIN3, S_DRAIN4, S_DRAIN5,
        S_LINK_TAKE1, S_LINK_TAKE2, S_LINK_FREE1, S_LINK_FREE2, S_LINK_FREE3, S_NATIVE_INIT, S_VSTRUCT, S_ARENA_SIZE,
-       S_SLOT_SIZE, S_LINK_SIZE, S_D3D_IAT, S_COUNT };
+       S_SLOT_SIZE, S_LINK_SIZE, S_D3D_IAT, S_ENGINE, S_COUNT };
 // The fourth inline push and the fifth drain site exist only on the Complete Edition; on 1.0.8.0 they are marked
 // ST_ABSENT, so the log does not mention them.
 static const char* const kSiteName[S_COUNT] = { "QueuePush", "QueuePushIn1", "QueuePushIn2", "QueuePushIn3", "QueuePushIn4",
     "DrainFlush", "DrainCreate", "DrainOver1", "DrainOver2", "DrainFlush2", "LinkTake1", "LinkTake2", "LinkFree1", "LinkFree2",
-    "LinkFree3", "NativeInit", "VehicleStruct", "ArenaSize", "SlotSize", "LinkSize", "D3DCreate9" };
+    "LinkFree3", "NativeInit", "VehicleStruct", "ArenaSize", "SlotSize", "LinkSize", "D3DCreate9", "EngineSlots" };
 struct Site { int state; char note[112]; };
 static Site g_site[S_COUNT];
 static uint32_t g_raised[S_COUNT];   // what each size raise left at its site, read back at sizing
@@ -706,6 +725,9 @@ __declspec(naked) static void ThunkNativeInitCe() {
 // ---------------------------------------------------------------------------------------------
 // Launch-time settings, each written once before the game reads it
 // ---------------------------------------------------------------------------------------------
+// One reference to the engine-sound slot table: where its displacement (or immediate) is, the opcode bytes before it,
+// and which field of an entry it addresses (+0 the waveslot, +4 the bank, +8 the refcount, +12 the release time).
+struct AudioRef { uint32_t at; uint8_t pre[2]; uint8_t preN; uint8_t field; };
 struct CoreSites {                                                    // rebased; the harness fills it with mocks
     int build;                                                        // BUILD_1080 or BUILD_CE: the shapes that differ
     uintptr_t cache, push, pushIn[4], drain, drainSite[5];            // the release queue
@@ -726,8 +748,10 @@ struct CoreSites {                                                    // rebased
     uintptr_t memRestrictTest, prmNoMemRestrict, prmMemRestrict;   // which budget row the game runs on, asked its way
     uintptr_t setView, setDetail, setCars;   // the player's View Distance, Detail Distance and Car Density: logged, never written
     uint32_t playerPedOff;                                            // CPlayerInfo -> the player's ped: 0x58C, 0x598 on the CE
-    uintptr_t audioSlotCap, audioHeap, audioSlots;                    // the engine-sound slots: read, never written
-    uintptr_t frameCounter, frameInc;                                 // the game's frame counter and the add that advances it, for the load line; 0 = not on this build
+    uintptr_t audioSlotCap, audioHeap, audioSlots;                    // the engine-sound slots
+    uintptr_t audioHeapLow, audioHeapPtr, audioTable, wavePath, waveReader, waveSummed;   // and what their raise writes or checks
+    uint8_t waveReadPush;                                             // the reader is push [ptr] (the CE) rather than mov edx, [ptr]
+    const AudioRef* audioRefs; int audioRefN; intptr_t audioRefShift; // the table's references; shift = where the exe loaded
     uint8_t audioCapModRm;                                            // the loop counts in eax (0xF8) or, on the CE, edi (0xFF)
 };
 static CoreSites g_cs;
@@ -740,7 +764,7 @@ static void SitesShape1080(CoreSites& c) {
     for (int i = 0; i < 4; i++) c.pushInEdi[i] = 0;
     c.linkFreeForm[0] = F_MOV_EBX; c.linkFreeForm[1] = F_MOV_EBX; c.linkFreeForm[2] = F_MOV_IMM0;
     c.initGuardMask = 4; c.nativeSizeForm = F_MOV_ESI; c.paramCmpForm = F_CMP_ESI; c.playerPedOff = 0x58Cu;
-    c.audioCapModRm = 0xF8;
+    c.audioCapModRm = 0xF8; c.waveReadPush = 0;
 }
 static void SitesShapeCe(CoreSites& c) {
     c.build = BUILD_CE;
@@ -748,7 +772,7 @@ static void SitesShapeCe(CoreSites& c) {
     c.pushInEdi[0] = 1; c.pushInEdi[1] = 0; c.pushInEdi[2] = 0; c.pushInEdi[3] = 1;   // the first and the fourth store edi
     c.linkFreeForm[0] = F_MOV_IMM0; c.linkFreeForm[1] = F_MOV_EAX; c.linkFreeForm[2] = F_MOV_IMM0;
     c.initGuardMask = 6; c.nativeSizeForm = F_MOV_EBX; c.paramCmpForm = F_CMP_ECX; c.playerPedOff = 0x598u;
-    c.audioCapModRm = 0xFF;
+    c.audioCapModRm = 0xFF; c.waveReadPush = 1;
 }
 
 // A pool or arena size written as an imm32 (op xx xx xx xx) that the game reads once when it builds that pool. Raised to
@@ -999,78 +1023,7 @@ static bool VulkanLoaded() { return GetModuleHandleA("vulkan-1.dll") != NULL; }
 // name, because a wrapper (ReShade, ENB) owns that object on some installs.
 static int g_dxvkVer[3] = { -1, -1, -1 };          // -1: not found
 static char g_dxvkVerFrom[48] = "";                // the module the version was read from, for the log
-// A frame-rate cap. -managed is what makes a raised budget safe under DXVK (without it the address space collapses
-// at a budget of 1400, run D), and under a cap a load with -managed is a slow one: the world build after the player
-// appears is paced by presents that block, about 300 frames of them (5 fps and 61 s at a 30 fps cap, 9 fps and 30 s
-// at 60, runs L4 and L7). SISCO can see DXVK's own cap and a VSync forced in DXVK's config (read by SIS.cpp before
-// the game starts, with the parser below) and whether RTSS is loaded; it cannot see the driver's cap or RTSS's
-// figure. Any visible cap, or a forced interval, means -managed is not written and the budget stays the game's own,
-// whoever asked for -managed: the immediate present below bypasses neither. Everything else is logged, with the
-// frame rate of the build where the game's counter is known, so a report carries it.
-static int g_frameCap;                             // a visible DXVK cap in fps, 0 = none seen; set by SIS.cpp before Direct3DCreate9
-static int g_forcedInterval = -1;                  // d3d9.presentInterval from DXVK's config; -1 = not set, 1 or more = VSync forced
 static bool g_managedOn;                           // -managed is in effect after Direct3DCreate9: SISCO's or the player's
-static char g_frameCapFrom[48] = "";               // where the cap was seen
-static char g_capNote[400] = "";                   // why -managed was not set, for the size line; empty when it was
-#ifdef SISCO_TEST
-static int g_tRtss = -1;                           // the harness's answer for RTSS; -1 = ask the process
-#endif
-static bool RtssLoaded() {
-#ifdef SISCO_TEST
-    if (g_tRtss >= 0) return g_tRtss != 0;
-#endif
-    return GetModuleHandleA("RTSSHooks.dll") != NULL;
-}
-// DXVK's config, parsed the way DXVK 3.1 parses it (config.cpp, parseUserConfigLine): a line is "key = value", the
-// key [A-Za-z0-9._]+ and the value up to the first whitespace with any quotes dropped; a "[name]" line switches the
-// lines after it on only while name is the exe's file name, exactly; a later line wins, and a later value that is
-// not DXVK's integer (an optional '-', then digits) unsets the key, because DXVK's own read then falls back to its
-// default; anything else is ignored, which is how a '#' comment is. The DXVK_CONFIG variable holds the same lines
-// split on ';', applied over the file. The keys 3.1's D3D9 reads: dxvk.maxFrameRate over d3d9.maxFrameRate (1 or
-// more is a cap; 0 and below are not one SISCO can name), and d3d9.presentInterval (0 or more is forced over the
-// game's interval, and over the immediate present SISCO asks for while the world builds). dxgi.maxFrameRate and the
-// DXVK_FRAME_RATE variable belong to older DXVKs and are not read by 3.1's D3D9, so not here.
-#define CONF_UNSET (-1000000)
-struct DxvkConf { int d3d9Cap, dxvkCap, interval; const char* d3d9CapFrom; const char* dxvkCapFrom; const char* intervalFrom; };
-static bool ConfInt(const char* p, const char* e, int* out) {
-    int sign = 1; long long v = 0;
-    if (p < e && *p == '-') { sign = -1; p++; }
-    if (p >= e) return false;
-    for (; p < e; p++) { if (*p < '0' || *p > '9') return false; v = v * 10 + (*p - '0'); if (v > 100000000) return false; }
-    *out = (int)(sign * v);
-    return true;
-}
-static void DxvkConfParse(const char* text, size_t n, char sep, const char* exeName, const char* from, DxvkConf* c) {
-    bool active = true;
-    const char* end = text + n;
-    for (const char* line = text; line < end; ) {
-        const char* le = line; while (le < end && *le != sep && *le != '\n' && *le != '\r') le++;
-        const char* p = line; while (p < le && (*p == ' ' || *p == '\t')) p++;
-        if (p < le && *p == '[') {
-            const char* name = p + 1;
-            const char* q = le; while (q > name && *(q - 1) != ']') q--;         // the name runs to the last ']'
-            size_t nameN = q > name ? (size_t)(q - 1 - name) : 0;
-            active = nameN == strlen(exeName) && memcmp(name, exeName, nameN) == 0;
-        } else {
-            const char* k = p;
-            while (p < le && ((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '.' || *p == '_')) p++;
-            size_t kn = (size_t)(p - k);
-            while (p < le && (*p == ' ' || *p == '\t')) p++;
-            if (kn && p < le && *p == '=') {
-                p++; while (p < le && (*p == ' ' || *p == '\t')) p++;
-                char v[32]; size_t vn = 0;
-                for (; p < le && *p != ' ' && *p != '\t'; p++) if (*p != '"' && vn < sizeof(v) - 1) v[vn++] = *p;
-                int i = CONF_UNSET; bool ok = ConfInt(v, v + vn, &i);
-                if (active) {
-                    if (kn == 17 && memcmp(k, "d3d9.maxFrameRate", 17) == 0) { c->d3d9Cap = ok ? i : CONF_UNSET; c->d3d9CapFrom = from; }
-                    else if (kn == 17 && memcmp(k, "dxvk.maxFrameRate", 17) == 0) { c->dxvkCap = ok ? i : CONF_UNSET; c->dxvkCapFrom = from; }
-                    else if (kn == 20 && memcmp(k, "d3d9.presentInterval", 20) == 0) { c->interval = ok ? i : CONF_UNSET; c->intervalFrom = from; }
-                }
-            }
-        }
-        line = le; while (line < end && (*line == sep || *line == '\n' || *line == '\r')) line++;
-    }
-}
 #ifdef SISCO_TEST
 static const uint8_t* g_tDxvkImage; static size_t g_tDxvkImageN;   // the harness plants an image in place of the module
 #endif
@@ -1144,9 +1097,6 @@ static void SisOnFirstD3D(void* d3d) {
         else strcpy_s(ver, "; DXVK version not found in any module");
         if (IsWine()) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; %s%s", g_wineNote,
                                   strcmp(g_dxvkVerFrom, "d3d9.dll") == 0 ? " (DXVK loaded as d3d9.dll: on Proton that is Proton's own, ahead of the game folder's vulkan.dll)" : "");
-        if (g_frameCap > 0) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; frame cap %d fps (%s)", g_frameCap, g_frameCapFrom);
-        if (g_forcedInterval >= 1) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; VSync forced in DXVK's config (d3d9.presentInterval %d)", g_forcedInterval);
-        if (RtssLoaded()) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; RTSS is loaded (its cap cannot be read: a frame limit makes loads slow with -managed)");
     }
     if (g_dxgiState == 0) DxgiInit();
     int64_t b = -1;
@@ -1156,22 +1106,11 @@ static void SisOnFirstD3D(void* d3d) {
     else if (g_dxvk == 1) {
         uint32_t un = 0, ma = 0, vm = 0;
         RdU32(g_cs.prmUnmanaged, &un); RdU32(g_cs.prmManaged, &ma); RdU32(g_cs.prmVidmem, &vm);
-        // A visible frame cap, or a VSync forced in DXVK's config: -managed is not written, and the note holds the
-        // budget at sizing even when the player's own -managed is kept, because the slow load was measured with
-        // -managed however it got there. Neither is bypassed by the immediate present below.
-        bool capped = g_frameCap > 0 || g_forcedInterval >= 1;
-        if (g_frameCap > 0) _snprintf_s(g_capNote, sizeof(g_capNote), _TRUNCATE, "a frame-rate cap of %d fps (%s): under -managed a capped load is a slow one (measured: "
-                                "a 30 fps cap turned a 2 s world build into 61 s, a 60 cap into 30 s), so SISCO leaves -managed unset and the budget at the "
-                                "game's own; lift the cap while loading for the raised budget", g_frameCap, g_frameCapFrom);
-        else if (capped) _snprintf_s(g_capNote, sizeof(g_capNote), _TRUNCATE, "VSync forced in DXVK's config (d3d9.presentInterval %d): it overrides the immediate "
-                                "present SISCO uses while the world builds, and under -managed a load behind VSync is a slow one (measured: 27 s for a 2 s "
-                                "world build at 120 Hz), so SISCO leaves -managed unset and the budget at the game's own; remove that line for the raised "
-                                "budget (the game's own VSync setting is fine)", g_forcedInterval);
-        else g_capNote[0] = 0;
+        // -managed goes in whatever frame limit the player runs: while a load is in progress most presents are not made
+        // at all (HkSwapPresent), so nothing that waits inside a present can pace it.
         const char* m;
         if (un) m = "the player's -unmanaged kept";
-        else if (ma) m = capped ? "the player's -managed kept; under the visible cap the budget still stays the game's own" : "the player's -managed kept";
-        else if (capped) m = "-managed NOT set under a visible cap, so the budget stays the game's own (the size line says how to get it)";
+        else if (ma) m = "the player's -managed kept";
         else m = WrU32(g_cs.prmManaged, (uint32_t)(uintptr_t)g_flagArg) ? "-managed set" : "-managed NOT set (write failed)";
         uint32_t m2 = 0; RdU32(g_cs.prmManaged, &m2); g_managedOn = m2 != 0 && !un;
         // Whatever the player set is the figure the game will believe, on whichever build, so it bounds the
@@ -1194,31 +1133,48 @@ static void SisOnFirstD3D(void* d3d) {
     SisLog("direct3d", "%s", g_d3dNote);
 }
 // ---------------------------------------------------------------------------------------------
-// Immediate presents while the world builds. Under -managed the world build after the player appears is paced by
-// presents that block: with VSync (120 Hz, no limiter, run L10) or a frame cap (L4 at 30, L7 at 60) the game crawls
-// at 5 to 10 fps for about 300 frames, 27 to 61 s, where an unblocked present builds the same world in 2 s and no
-// -managed builds it in 2 s under the 30 fps cap (L6). The phase before the player appears is not paced that way
-// (31 to 32 s with and without VSync, L10 against L13). So from the tick the worker sees the player appear after a
-// load, every present carries D3DPRESENT_FORCEIMMEDIATE, which DXVK 3.1 honours per call (d3d9_swapchain.cpp:135)
-// unless d3d9.presentInterval is forced in its config (:140; SIS.cpp reads that and the cap rule holds the budget
-// for it), and VSync is handed back once the world has built and 15 s have passed (LoadTick below). The menu and
-// the loading screens run as the game presents them. DXVK's own limiter and external ones (RTSS, the driver's) are
-// not bypassed by the flag; those keep the frame-cap rule. The hook is the shape DLSS-IV has run on this game under
-// DXVK since September: IDirect3D9::CreateDevice (slot 16) on the object Direct3DCreate9 returns, then the swap
-// chain's Present (slot 3) from GetSwapChain(0), each written once with the original read first; an overlay that
-// hooks above later is left alone, since the slot is never rewritten. The two slots are DXVK's, not the game's, so
-// they are chained, not compared against expected bytes. Only with -managed in effect and the budget on; the flag
-// is raised by the worker alone, so without a worker it is never raised.
+// Presents not made while a load is in progress. Under -managed, which a raised budget needs, the game's loading is
+// paced by presents: DXVK's Present takes the device lock first and holds it through its wait (d3d9_swapchain.cpp:113),
+// and every texture upload of the load queues behind the presenting thread's sleep, whether that is VSync, a frame cap,
+// a forced interval or a compositor. Measured with every present made: the world build after the player appears took
+// 27 s behind VSync at 120 Hz (L10) and 61 s behind a 30 fps cap (L4) where it takes 2; the load before the player,
+// 36 s from launch to the player with VSync on (S5) where it takes 11 without -managed (S4). So while a loading screen
+// is up, and while the world builds after the player appears, most presents return at once without reaching DXVK: no
+// lock taken, nothing for a limiter to hold. One goes through every PRESENT_SHOW_LOADING_MS on a loading screen (an
+// intro movie's own rate) and every PRESENT_SHOW_MS while the world builds, with the game's own interval, so the screen
+// still moves; DXVK's staging-memory rule keeps submitting the uploads meanwhile (ConsiderFlush in d3d9_device.cpp).
+// Measured: 10 s from launch to the world built with VSync on (S7, S9), 17 s under a 30 fps cap (S8), against 82 and
+// 90 with every present made. Forcing the presents immediate instead, the first fix, stalled a loading screen whose
+// window was not the foreground one until it was clicked, and thousands a second starved the loader; it is gone.
+// The hook is the shape DLSS-IV has run on this game under DXVK since September: IDirect3D9::CreateDevice (slot 16)
+// on the object Direct3DCreate9 returns, then the swap chain's Present (slot 3) from GetSwapChain(0), each written
+// once with the original read first; an overlay that hooks above later is left alone, since the slot is never
+// rewritten. The two slots are DXVK's, not the game's, so they are chained, not compared against expected bytes. Only
+// with -managed in effect and the budget on; the skip is raised by the worker alone, so without a worker no present is
+// ever skipped.
 // ---------------------------------------------------------------------------------------------
-#define SIS_FORCEIMMEDIATE 0x00000100u             // D3DPRESENT_FORCEIMMEDIATE
 typedef HRESULT (__stdcall* CreateDevice_t)(void* d3d, UINT adapter, UINT type, HWND wnd, DWORD flags, void* pp, void** out);
 typedef HRESULT (__stdcall* GetSwapChain_t)(void* dev, UINT i, void** out);
 typedef HRESULT (__stdcall* SwapPresent_t)(void* sc, const RECT* src, const RECT* dst, HWND wnd, const RGNDATA* dirty, DWORD flags);
 static CreateDevice_t g_oCreateDevice;
 static SwapPresent_t g_oSwapPresent;
 static void** g_d3dVtblHooked; static void** g_swapVtblHooked;
-static volatile LONG g_presentImmediate;           // 1 while the world builds after a load: presents go out without waiting for VSync
-static volatile LONG g_immediatePresents;          // how many went out that way this load, for the log
+static volatile LONG g_presentSkip;                // 1 while a loading screen is up and while the world builds after it: most presents are not made
+static volatile LONG g_skippedPresents;            // how many were not made this load, for the log
+static int64_t g_lastShownMs;                      // the clock when a present last went through during a skip
+#define PRESENT_SHOW_MS 100                        // one present per this many ms goes through while the world builds (run S1)
+#define PRESENT_SHOW_LOADING_MS 33                 // and per this many while a loading screen is up: 30 a second, an intro movie's rate
+static volatile LONG g_showMs = PRESENT_SHOW_MS;   // the one in force
+// The world's render targets end the skip on the present that first sees them. During a load the targets hold the
+// loading screen's small set (63 MB at 4K, 156 after the menu, 5 on a Deck) for the whole build and jump to the world's
+// in its last second (L4: 63 MB for 60 s, then 501 and 797 within one; every run in the kit alike), so the jump is the
+// first frame of gameplay. Twice the set seen at the player's edge, at least RT_FINISHED_MIN_MB; 0 = not in force (a
+// loading screen, or an edge where the world's set already existed, as after a save switch: the worker's rule then).
+static volatile LONG g_skipRtEnd;
+static volatile LONG g_skipEndedRt;                // the set, in MB, that ended the skip in the hook; the worker logs it
+#ifdef SISCO_TEST
+static int64_t g_tPresentMs = -1;                  // the harness's clock for the hook, -1 = the real one
+#endif
 static bool WriteSlot(void** vt, int slot, void* fn) {
     DWORD old = 0;
     if (!VirtualProtect(vt + slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
@@ -1227,7 +1183,23 @@ static bool WriteSlot(void** vt, int slot, void* fn) {
     return true;
 }
 static HRESULT __stdcall HkSwapPresent(void* sc, const RECT* src, const RECT* dst, HWND wnd, const RGNDATA* dirty, DWORD flags) {
-    if (g_presentImmediate) { flags |= SIS_FORCEIMMEDIATE; InterlockedIncrement(&g_immediatePresents); }
+    if (g_presentSkip) {
+        LONG endMb = g_skipRtEnd; uint64_t rt = 0;
+        if (endMb > 0 && RdU64(g_cs.rt0, &rt) && (LONG)(rt >> 20) >= endMb) {
+            InterlockedExchange(&g_presentSkip, 0);
+            InterlockedExchange(&g_skipEndedRt, (LONG)(rt >> 20));
+            return g_oSwapPresent(sc, src, dst, wnd, dirty, flags);          // the first frame of gameplay goes out as the game sent it
+        }
+        int64_t now =
+#ifdef SISCO_TEST
+            g_tPresentMs >= 0 ? g_tPresentMs :
+#endif
+            NowMs();
+        // Not made: no device lock taken, nothing for a limiter or a compositor to hold; the presenting thread yields
+        // for a millisecond instead of spinning against the threads that build the world.
+        if (now - g_lastShownMs < g_showMs) { InterlockedIncrement(&g_skippedPresents); Sleep(1); return S_OK; }
+        g_lastShownMs = now;                                                // shown, with the game's own interval
+    }
     return g_oSwapPresent(sc, src, dst, wnd, dirty, flags);
 }
 static HRESULT __stdcall HkCreateDevice(void* d3d, UINT adapter, UINT type, HWND wnd, DWORD flags, void* pp, void** out) {
@@ -1242,8 +1214,8 @@ static HRESULT __stdcall HkCreateDevice(void* d3d, UINT adapter, UINT type, HWND
         g_oSwapPresent = (SwapPresent_t)svt[3];
         if (WriteSlot(svt, 3, (void*)HkSwapPresent)) {
             g_swapVtblHooked = svt;
-            SisLog("present", "the swap chain Present is hooked: presents go out without waiting for VSync while the world builds after each load");
-        } else { g_oSwapPresent = NULL; SisLog("present", "the swap chain Present could NOT be hooked: VSync is not bypassed while the world builds"); }
+            SisLog("present", "the swap chain Present is hooked: most presents are not made while a loading screen is up and while the world builds after it");
+        } else { g_oSwapPresent = NULL; SisLog("present", "the swap chain Present could NOT be hooked: every present is made while a load is in progress, so a VSync or a limiter slows it"); }
     }
     ((IUnknown*)sc)->Release();
     return hr;
@@ -1353,48 +1325,48 @@ static int SizeBudget(int64_t bMb, int64_t xMb, int tStock, bool extra, int* tVr
     int t = tv < T_MAX_MB ? tv : T_MAX_MB;
     return t < tStock ? tStock : t;
 }
-// Car and ped budgets, from the measured ladders: 200 MB each once the budget reaches 2000 MB,
+// Car and ped budgets, from the measured ladders: 200 MB of cars and 180 MB of peds once the budget reaches 2000 MB,
 // scaled down with it to the game's own values at its stock budget, so a small card keeps its world. A larger value
-// already there (FusionFix's VehicleBudget or PedBudget) stands. Bytes, as FusionFix writes them.
-#define CARPED_FULL 200000000u
+// already there (FusionFix's VehicleBudget or PedBudget) stands. Bytes, as FusionFix writes them. Peds stop at 180
+// (owner, 2026-09-24): car and ped models are paid from the same streaming budget as the world. The ped ladder, with
+// the pack, measured 4 ped models on the street at 50 MB and at 100 MB and 7 at 200: the models in use already hold
+// about 120 MB, so a new one only comes in above that, then about one more per 30 MB, and at 200 half the looks found
+// no new model to ask for. 180 buys most of 200's variety and leaves 20 MB with the world.
+#define CAR_FULL 200000000u
+#define PED_FULL 180000000u
 // The most car budget the game's OWN VehicleStruct pool can use. Its guard keeps 20 of its 50 slots free, so about
 // 30 loaded models is the ceiling without the raise, and the ladder measured 24 loaded at 120 MB, 31 at 160 and 41
 // at 200. Past this a refused pool raise means the extra budget buys nothing, so the budget stops here instead.
 #define CAR_NO_POOL 120000000u
 #define CAR_STOCK 40000000u
 #define PED_STOCK 50000000u
-static uint32_t CarPedFor(uint32_t stock, int t, int tStock) {
-    if (t >= 2000) return CARPED_FULL;
+static uint32_t CarPedFor(uint32_t stock, uint32_t full, int t, int tStock) {
+    if (t >= 2000) return full;
     if (t <= tStock || tStock >= 2000) return stock;
-    return stock + (uint32_t)((double)(CARPED_FULL - stock) * (t - tStock) / (2000 - tStock));
+    return stock + (uint32_t)((double)(full - stock) * (t - tStock) / (2000 - tStock));
 }
 
 // ---------------------------------------------------------------------------------------------
 // What the sizing decided, read by the brake when the traffic budgets follow it.
 static bool g_sized;
-static bool g_worldLogged;    // a "world" line has been written: the player has appeared after a load at least once
-static uint32_t g_worldFrame; // the game's frame counter when the player last appeared, and the worker's clock then
-static int64_t g_worldMs, g_tickMs;
-// One load at a time, from the player appearing to the world built around them: the phase -managed makes slow, timed
-// by the render targets, which are built in stages during it and hold once it is over. The verdict is the load line;
-// a slow one is named as far as SISCO can see and handed to the worker for the file beside the log. LoadTick below.
+static bool g_worldLogged;    // a "world" line has been written: the player has appeared after a load at least once (for the harness)
+static int64_t g_worldMs;     // the worker's clock when the player last appeared (for the harness)
+// One load at a time, from the player appearing to the world built around them, timed by the render targets, which
+// are built in stages during it and hold once it is over. The verdict is the load line. LoadTick below.
 static bool g_ldUp;              // the loading flag was up on the last tick
+static int64_t g_ldUpMs;         // the worker's clock when it went up: the loading screen's start, for the world line
 static bool g_ldPending = true;  // the flag is down and the player has not appeared yet: the next appearance is a load's edge
 static int64_t g_ldEdgeMs;       // the worker's clock when the player appeared, 0 while no load is being timed
 static int64_t g_ldChangeMs;     // the last tick the render targets changed since the edge: the build's end once they hold
-static uint32_t g_ldChangeFrame; // the game's frame counter then
 static int64_t g_ldX;            // the render targets on the last tick, -1 while not built
 static int g_ldSteady;           // ticks they have held that size
 static bool g_ldVerdict;         // the load line has been written for this load
 static int g_loadN;              // loads timed this run
 static int64_t g_loadBuildS;     // the last build, in whole seconds: from the edge to the render targets' last change
-static int g_loadFps = -1;       // the game's frame rate over that build, where its counter is known; -1 = not measured
-static char g_slowLoadNote[700] = "";   // the last slow load with -managed in effect, named as far as it can be seen; empty otherwise
-static volatile LONG g_slowLoadPending; // 1 once per slow load: the worker writes the file beside the log and clears it
 #define LOAD_STEADY_TICKS 3      // the render targets have held this long after a change: the build is over
-#define LOAD_HOLD_MS 15000       // presents go out immediately at least this long after the player appears, in case a stage holds
 #define LOAD_CEILING_MS 90000    // and never longer than this, whatever the render targets do
-#define LOAD_SLOW_S 20           // a build longer than this with -managed is a slow load: 2 s measured unheld, 27 to 61 held
+#define SKIP_MAX_STEADY 10       // presents are skipped at most this many ticks past the last change, whatever the set's size
+static int g_menuTicks;          // ticks with the loading flag down and nobody in the world: two of them are the menu
 static int g_sizedT, g_sizedTStock, g_sizedX;
 static bool g_carHeld;        // the car budget stopped where the game's own VehicleStruct pool can use it
 static uint32_t g_setView, g_setDetail, g_setCars;   // the sliders as read at sizing, for the log and the harness
@@ -1415,7 +1387,14 @@ static int64_t g_settleX = -1; static int g_settleTicks;   // the render targets
 // (796 at 4K, 252 at 1080p), so 37 MB at 640x480 is the smallest any playable resolution makes, while the first build
 // stage is 5 MB at 1280x800 (a Steam Deck, where it held for over 45 s on a slow load and was sized against).
 #define RT_FINISHED_MIN_MB 24
+// Under 128 MB a set can still be a first build stage (63 MB at 4K, 28 at 1080p); at the player's edge a set of
+// 400 MB or more is the world's already, finished (765 at 4K), and there is nothing left for the skip to wait for.
+#define RT_PART_BUILT_MB 128
+#define RT_WORLD_AT_EDGE_MB 400
 static int64_t g_rtMin;       // the smallest render-target set seen this run, in MB; 0 until one is seen
+// A set that may still be a part-built stage: under RT_PART_BUILT_MB and not twice the smallest seen. The sizing
+// and the load tracker both wait on it, up to SETTLE_LONG_TICKS.
+static __forceinline bool PartBuilt(int64_t xMb) { return xMb < RT_PART_BUILT_MB && xMb < 2 * g_rtMin; }
 
 // The brake, proven in the field without a texture pack, which is the hard case. Without a pack, a large
 // budget holds so many models that the 32-bit address space runs out before V reaches the budget: DXVK keeps a mapped
@@ -1456,7 +1435,11 @@ static int BrakeDecide(BrakeState& st, int64_t nowMs, int64_t vMb, int64_t xMb, 
     return st.t;
 }
 static int g_brakeOn;
-static BrakeCfg g_brakeCfg = { 512, 32, 128, 192, 20, 800 };
+// The Windows lines, as BRAKEN2 ran them in the field: a hold under 512 MB, and a step every 10 s, fall or not, under
+// 192 MB (12 of DXVK's 16 MiB chunks left). On Wine BrakeWineLines lowers both from here.
+#define BRAKE_HOLD_MB 512
+#define BRAKE_EMERGENCY_MB 192
+static BrakeCfg g_brakeCfg = { BRAKE_HOLD_MB, 32, 128, BRAKE_EMERGENCY_MB, 20, 800 };
 static const char* AddrSpaceNote(char* out, size_t cap);   // below, with the address-space walk: the brake lines carry the layout on Wine
 static BrakeState g_brakeSt;
 // All 48 cells, aligned 32-bit stores of the low dword (8v: safe from any thread; the high dword is 0 for every value
@@ -1470,7 +1453,7 @@ static bool WriteBudgetAll(uintptr_t table, int mb) {
 }
 static void BrakeStart(int tMb, int floorMb) {
     g_brakeCfg.floorMb = floorMb < tMb ? floorMb : tMb;
-    g_brakeCfg.holdMb = 512; g_brakeCfg.emergencyMb = 128;       // the Windows lines, measured (BRAKEN2)
+    g_brakeCfg.holdMb = BRAKE_HOLD_MB; g_brakeCfg.emergencyMb = BRAKE_EMERGENCY_MB;
     g_brakeSt.t = tMb; g_brakeSt.held = false; g_brakeSt.refL = -1; g_brakeSt.lastActMs = 0;
     g_brakeOn = 1;
 }
@@ -1486,8 +1469,8 @@ static void BrakeWineLines(int64_t lAtSizingMb) {
 
 // The car and ped budgets as SISCO keeps them: the target, and what it last wrote (anything else there was written by
 // someone else: FusionFix's asynchronous init, or another mod).
-struct TrafficBudget { uintptr_t addr; uint32_t stock, target, written, fromOther; bool on; const char* name; };
-static TrafficBudget g_car = { 0, CAR_STOCK, 0, 0, 0, false, "car" }, g_ped = { 0, PED_STOCK, 0, 0, 0, false, "ped" };
+struct TrafficBudget { uintptr_t addr; uint32_t stock, full, target, written, fromOther; bool on; const char* name; };
+static TrafficBudget g_car = { 0, CAR_STOCK, CAR_FULL, 0, 0, 0, false, "car" }, g_ped = { 0, PED_STOCK, PED_FULL, 0, 0, 0, false, "ped" };
 static void TrafficSet(TrafficBudget& b, uint32_t v) {
     b.target = v;
     if (WrU32(b.addr, v)) b.written = v;
@@ -1513,7 +1496,7 @@ static void TrafficFollow(int tMb, int tStock) {
     for (int i = 0; i < 2; i++) {
         TrafficBudget& b = *both[i];
         if (!b.on) continue;
-        uint32_t want = CarPedFor(b.stock, tMb, tStock);
+        uint32_t want = CarPedFor(b.stock, b.full, tMb, tStock);
         if (b.fromOther > want) want = b.fromOther;
         if (want >= b.target) continue;
         SisLog("budget", "the %s budget follows the world's: %u -> %u MB", b.name, b.target / 1000000, want / 1000000);
@@ -1588,13 +1571,334 @@ static bool PlayerInWorld() {
     if (!RdF32(mat + 0x30, &x) || !RdF32(mat + 0x34, &y) || !RdF32(mat + 0x38, &z)) return false;
     return x > -20000 && x < 20000 && y > -20000 && y < 20000 && z > -2000 && z < 5000;
 }
-// The engine-sound slots, for the log only: SISCO reads these three and writes none of them. The game fills a table at
-// startup by asking pc\audio\config\waveslots.xml for STREAM_ENGINE_1, _2 and so on until one is not declared, stopping
-// at the limit in its own loop as well, and then plays one looping engine sound per distinct vehicle model near the
-// player out of that table. Stock GTA IV declares 15, so a sixteenth distinct model nearby is silent; a raised car
-// budget is what makes that reachable, which is why the figure belongs in the log beside the budget. Raising it is
-// another mod's job: the ones that do it patch this loop's limit, the table and the audio heap, and SISCO touches
-// none of those three.
+// ---------------------------------------------------------------------------------------------
+// Engine-sound slots, raised. The game gives each car's streamed engine sound a slot, one per engine sound bank, and the
+// car keeps it until the car is deleted; with every slot held, the next car with a new bank gets none and its engine is
+// silent (0x835757 skips it). Stock waveslots.xml declares 15 and the game's loop stops at 25, while the raised car
+// budget loads up to 41 car models (the car ladder at 200 MB). So SISCO raises it to ENGINE_SLOTS, as revd
+// (github.com/gutbash/revd) does, without what revd needs and SISCO does not: a polling thread (every site is plain code,
+// written here before the game's audio exists), a fixed 192 MiB heap (66 MiB of address space where the slots need 26),
+// and editing the game's file. The table (25 x 16 bytes, with other data straight after it on 1.0.8.0) moves into SISCO;
+// every reference to it is repointed (15 on 1.0.8.0 with a dead lea, 14 on the CE; a scan of every dword in both files
+// finds no other, and the site check repeats that scan on every build); the loop's limit is raised; the audio heap the
+// slots are carved from grows by exactly what the file declares (the game sums every slot's Size, aligned to 128, except
+// one named TEST, over a margin of 11,487,232 bytes: 126 MiB for the stock 15, 152 for 48); and the extra slots are
+// declared in waveslots_sisco.xml, a file of SISCO's own in pc\audio\config. The game picks its slot file itself, as its audio starts: it
+// reads driverSettings.xml and points its slot-file pointer at the WaveSlotsConfig value there ("audio:/config/
+// waveslots.xml" in every install seen), or at waveslot_.xml, a small file, on a PC with under 1.4 GB of RAM (0x78FC40),
+// then reads that pointer once (0x78EC4D). A pointer SISCO writes is overwritten there (runs E1 and E3), so SISCO patches
+// that one read instead, to hand over waveslots_sisco.xml, and builds it from the file the game would have read. No game
+// file is edited, and without SISCO the game reads its own file as before. Everything is checked before anything is
+// written, and written all or nothing.
+// ---------------------------------------------------------------------------------------------
+#define ENGINE_SLOTS 48                      // the car ladder at the 200 MB car budget held up to 41 car models
+#define ENGINE_SLOTS_MAX 127                 // the loop's limit is a signed imm8
+#define ENGINE_SLOT_SIZE 794624u             // a stock STREAM_ENGINE slot's Size
+#define AUDIO_HEAP_MARGIN 11487232u          // the stock heap less the stock file's slots
+#define AUDIO_HEAP_STOCK 0x7E00000u          // 126 MiB
+#define AUDIO_HEAP_STOCK_LOW 0x7300000u      // 115 MiB, on a machine with little RAM
+#define AUDIO_SLOTS_STOCK 25                 // the limit in the game's own loop
+#define AUDIO_HEAP_MAX (256u << 20)          // a file asking for more is refused: that is address space the world needs
+static const AudioRef kEngineRefs1080[15] = {
+    { 0x823D70u, { 0x8B, 0x80 }, 2, 0 }, { 0x824AB6u, { 0xBE, 0x00 }, 1, 0 }, { 0x824AFBu, { 0x8B, 0x8E }, 2, 0 },
+    { 0x824B06u, { 0x01, 0xBE }, 2, 8 }, { 0x824B1Bu, { 0x89, 0x96 }, 2, 4 }, { 0x824B2Du, { 0x83, 0x81 }, 2, 8 },
+    { 0x824B34u, { 0x8D, 0x81 }, 2, 8 }, { 0x824B49u, { 0x8B, 0x88 }, 2, 8 }, { 0x824B56u, { 0x89, 0x88 }, 2, 8 },
+    { 0x824B62u, { 0x89, 0x88 }, 2, 12 }, { 0x824B68u, { 0x83, 0xB8 }, 2, 8 }, { 0x825486u, { 0xBE, 0x00 }, 1, 8 },
+    { 0x82B349u, { 0x8B, 0xBF }, 2, 0 }, { 0x82B4D5u, { 0x8B, 0x80 }, 2, 0 }, { 0xA588A4u, { 0x8B, 0x88 }, 2, 0 } };
+static const AudioRef kEngineRefsCe[14] = {
+    { 0x98B979u, { 0x8B, 0x81 }, 2, 8 }, { 0x98B984u, { 0x89, 0x81 }, 2, 8 }, { 0x98B98Fu, { 0x89, 0x81 }, 2, 12 },
+    { 0x98B995u, { 0x83, 0xB9 }, 2, 8 }, { 0x98CBD0u, { 0x8B, 0x80 }, 2, 0 }, { 0x98D4C6u, { 0xBE, 0x00 }, 1, 8 },
+    { 0x98ECC6u, { 0xBE, 0x00 }, 1, 0 }, { 0x98ED09u, { 0x8B, 0x8E }, 2, 0 }, { 0x98ED0Fu, { 0xFF, 0x86 }, 2, 8 },
+    { 0x98ED23u, { 0x89, 0x86 }, 2, 4 }, { 0x98ED35u, { 0xFF, 0x80 }, 2, 8 }, { 0x999577u, { 0x8B, 0x80 }, 2, 0 },
+    { 0x999767u, { 0x8B, 0x80 }, 2, 0 }, { 0xC28054u, { 0xFF, 0xB0 }, 2, 0 } };
+__declspec(align(16)) static uint8_t g_engineTable[ENGINE_SLOTS_MAX * 16];   // the game's table, moved: zero, as the game's starts
+static char g_waveSiscoPath[] = "audio:/config/waveslots_sisco.xml";        // what the patched read hands the loader
+#define LOW_RAM_BYTES 0x59999980ull          // at or under this much RAM the game loads waveslot_.xml, its small file (0x78FC68)
+#ifdef SISCO_TEST
+static uint64_t g_tTotalRam;                 // the harness's answer, 0 = ask Windows
+#endif
+static uint64_t TotalRam() {
+#ifdef SISCO_TEST
+    if (g_tTotalRam) return g_tTotalRam;
+#endif
+    MEMORYSTATUSEX m = { sizeof(m) };
+    return GlobalMemoryStatusEx(&m) ? m.ullTotalPhys : 0;
+}
+// The reader as the game ships it, and as SISCO leaves it: mov edx, [ptr] / push [ptr], then mov edx, imm32 / push imm32
+// with a NOP, the same six bytes.
+static void WaveReaderBytes(const CoreSites& c, bool patched, uint8_t out[6]) {
+    uint32_t a = patched ? (uint32_t)(uintptr_t)g_waveSiscoPath : (uint32_t)c.wavePath;
+    if (patched) { out[0] = c.waveReadPush ? 0x68 : 0xBA; memcpy(out + 1, &a, 4); out[5] = 0x90; }
+    else { out[0] = c.waveReadPush ? 0xFF : 0x8B; out[1] = c.waveReadPush ? 0x35 : 0x15; memcpy(out + 2, &a, 4); }
+}
+struct EnginePlan { bool ready; int before, slots, fileSlots; uint32_t heapBytes; char from[96]; char why[120]; };
+static EnginePlan g_enginePlan;              // prepared by PlanEngineSlots, before the install
+static bool g_engineOn;                      // the raise went in
+static int g_enginePeak;                     // the most engine sounds held at once this run
+
+// Every site as the game shipped it, and the game's audio not built yet. A mismatch means another audio mod (revd,
+// VehicleAudioBugFix) already owns them, and then SISCO writes nothing.
+static bool EngineSitesMatch(const CoreSites& c, char* why, size_t cap) {
+    uint32_t n = 1, heap = 1, summed = 1;
+    if (!c.audioTable || !c.audioRefs || c.audioRefN <= 0) { _snprintf_s(why, cap, _TRUNCATE, "not on this build"); return false; }
+    RdU32(c.audioSlots, &n); RdU32(c.audioHeapPtr, &heap); RdU32(c.waveSummed, &summed);
+    if (n || heap || summed) { _snprintf_s(why, cap, _TRUNCATE, "too late: the game's audio already exists (it has read its slot file)"); return false; }
+    const uint8_t lim[3] = { 0x83, c.audioCapModRm, AUDIO_SLOTS_STOCK };
+    static const uint8_t h1[5] = { 0xBE, (uint8_t)AUDIO_HEAP_STOCK, (uint8_t)(AUDIO_HEAP_STOCK >> 8), (uint8_t)(AUDIO_HEAP_STOCK >> 16), (uint8_t)(AUDIO_HEAP_STOCK >> 24) },
+                         h2[5] = { 0xBE, (uint8_t)AUDIO_HEAP_STOCK_LOW, (uint8_t)(AUDIO_HEAP_STOCK_LOW >> 8), (uint8_t)(AUDIO_HEAP_STOCK_LOW >> 16), (uint8_t)(AUDIO_HEAP_STOCK_LOW >> 24) };
+    if (!BytesEq(c.audioSlotCap, lim, 3)) { _snprintf_s(why, cap, _TRUNCATE, "the slot limit is not the game's 25: another audio mod owns it"); return false; }
+    if (!BytesEq(c.audioHeap, h1, 5) || !BytesEq(c.audioHeapLow, h2, 5)) { _snprintf_s(why, cap, _TRUNCATE, "the audio heap is not the game's own: another audio mod owns it"); return false; }
+    for (int i = 0; i < c.audioRefN; i++) {
+        const AudioRef& r = c.audioRefs[i];
+        uintptr_t at = (uintptr_t)((intptr_t)r.at + c.audioRefShift); uint32_t v = 0;
+        if (!BytesEq(at - r.preN, r.pre, r.preN) || !RdU32(at, &v) || v != (uint32_t)(c.audioTable + r.field)) {
+            _snprintf_s(why, cap, _TRUNCATE, "the slot table's reference at %08X differs: another audio mod moved it", (unsigned)at); return false;
+        }
+    }
+    uint8_t rd[6]; WaveReaderBytes(c, false, rd);
+    if (!c.waveReader || !BytesEq(c.waveReader, rd, 6)) { _snprintf_s(why, cap, _TRUNCATE, "the slot file's reader differs: another audio mod owns it"); return false; }
+    uint64_t ram = TotalRam();
+    if (ram && ram <= LOW_RAM_BYTES) { _snprintf_s(why, cap, _TRUNCATE, "under 1.4 GB of RAM the game loads its small slot file, and SISCO leaves it"); return false; }
+    return true;
+}
+static const char* MemFind(const char* p, const char* end, const char* what) {
+    size_t n = strlen(what);
+    for (; p + n <= end; p++) if (*p == *what && memcmp(p, what, n) == 0) return p;
+    return NULL;
+}
+// A copy of an XML text with every comment blanked to spaces and every offset kept, to search in: a line a modder
+// commented out is not one the game reads. A comment never closed runs to the end. NULL when out of memory; the
+// caller frees it.
+static char* XmlLive(const char* s, size_t n) {
+    char* c = (char*)HeapAlloc(GetProcessHeap(), 0, n + 1);
+    if (!c) return NULL;
+    memcpy(c, s, n); c[n] = 0;
+    for (char* p = c; (p = (char*)MemFind(p, c + n, "<!--")) != NULL; ) {
+        const char* e = MemFind(p + 4, c + n, "-->");
+        char* stop = e ? (char*)e + 3 : c + n;
+        memset(p, ' ', (size_t)(stop - p)); p = stop;
+    }
+    return c;
+}
+// The file SISCO writes: the game's own, with STREAM_ENGINE_k added for every k from 1 to `want` it does not declare
+// (the game stops at the first missing number, so every gap is filled), before its closing tag, in its own line
+// endings, with the stock engine slot's body. A name declared twice is refused, as the game refuses it (WAVS10).
+struct WaveBuild { bool ok; int before, after, added, counted; uint32_t heapBytes; size_t outN; char why[120]; };   // counted: slots but TEST
+// s is the file as it is, live the same text with its comments blanked (XmlLive): every search is in live, and what
+// is written out is copied from s, comments and all.
+static WaveBuild WaveslotsScan(const char* s, const char* live, size_t n, int want, char* out, size_t cap) {
+    WaveBuild b = {};
+    static char names[512][64];
+    const char* end = live + n; const char* p = live;
+    int nn = 0; uint64_t block = 0; bool have[ENGINE_SLOTS_MAX + 2] = {};
+    if (want > ENGINE_SLOTS_MAX) want = ENGINE_SLOTS_MAX;
+    // The game takes every element under the root as a slot, whatever its tag says; SISCO reads only <Slot>, so a
+    // slot tag written any other way would be one the game loads and SISCO neither counts nor sizes the heap for.
+    int tags = 0, plain = 0;
+    for (const char* f = live; (f = MemFind(f, end, "<Slot")) != NULL; f += 5) { tags++; if (f + 5 < end && f[5] == '>') plain++; }
+    if (tags != plain) { strcpy_s(b.why, "a slot tag SISCO cannot read"); return b; }
+    while ((p = MemFind(p, end, "<Slot>")) != NULL) {
+        const char* q = MemFind(p, end, "</Slot>");
+        if (!q) { strcpy_s(b.why, "a <Slot> is never closed"); return b; }
+        const char* nm = MemFind(p, q, "<Name");
+        const char* v0 = nm ? (const char*)memchr(nm, '>', q - nm) : NULL;
+        const char* v1 = v0 ? (const char*)memchr(v0, '<', q - v0) : NULL;
+        const char* sz = MemFind(p, q, "<Size value=\"");
+        size_t len = v1 ? (size_t)(v1 - v0 - 1) : 0;
+        if (!v1 || !sz || !len || len >= sizeof(names[0]) || nn >= 512) { strcpy_s(b.why, "a slot without a name or a size SISCO can read"); return b; }
+        memcpy(names[nn], v0 + 1, len); names[nn][len] = 0;
+        for (int i = 0; i < nn; i++) if (!strcmp(names[i], names[nn])) { _snprintf_s(b.why, sizeof(b.why), _TRUNCATE, "it declares %s twice, which the game refuses too", names[nn]); return b; }
+        uint64_t size = 0; int digits = 0;
+        for (const char* d = sz + 13; d < q && *d >= '0' && *d <= '9' && digits < 10; d++, digits++) size = size * 10 + (*d - '0');
+        if (!digits || size > 0x7FFFFFFF) { strcpy_s(b.why, "a slot size SISCO cannot read"); return b; }
+        if (strcmp(names[nn], "TEST")) { block += (size + 127) & ~127ull; b.counted++; }
+        if (!strncmp(names[nn], "STREAM_ENGINE_", 14)) {
+            int k = 0, kd = 0; const char* e = names[nn] + 14;
+            for (; *e >= '0' && *e <= '9' && kd < 4; e++, kd++) k = k * 10 + (*e - '0');
+            if (kd && !*e && k >= 1 && k <= ENGINE_SLOTS_MAX) have[k] = true;
+        }
+        nn++; p = q + 7;
+    }
+    const char* close = NULL;
+    for (const char* f = live; (f = MemFind(f, end, "</WaveSlots>")) != NULL; f++) close = f;
+    if (!nn || !close) { strcpy_s(b.why, "not a waveslots file SISCO can read"); return b; }
+    while (b.before < ENGINE_SLOTS_MAX && have[b.before + 1]) b.before++;
+    const char* nl = MemFind(live, end, "\r\n") ? "\r\n" : "\n";
+    size_t o = (size_t)(close - live), tail = (size_t)(end - close);
+    if (o + tail + 256u * (size_t)want > cap) { strcpy_s(b.why, "no room for the file"); return b; }
+    memcpy(out, s, o);
+    for (int k = 1; k <= want; k++) {
+        if (have[k]) continue;
+        int w = _snprintf_s(out + o, cap - o - tail, _TRUNCATE, "  <Slot>%s    <Name content=\"ascii\">STREAM_ENGINE_%d</Name>%s    <MaxHeaderSize value=\"2048\" />%s"
+                            "    <LoadType content=\"ascii\">BANK</LoadType>%s    <Size value=\"%u\" />%s  </Slot>%s", nl, k, nl, nl, nl, ENGINE_SLOT_SIZE, nl, nl);
+        if (w < 0) { strcpy_s(b.why, "no room for the file"); return b; }
+        o += (size_t)w; have[k] = true; b.added++; b.counted++; block += (ENGINE_SLOT_SIZE + 127) & ~127u;
+    }
+    memcpy(out + o, s + (close - live), tail); b.outN = o + tail;
+    while (b.after < ENGINE_SLOTS_MAX && have[b.after + 1]) b.after++;
+    uint64_t heap = (block + AUDIO_HEAP_MARGIN + 0xFFFFFu) & ~0xFFFFFull;
+    if (heap < AUDIO_HEAP_STOCK) heap = AUDIO_HEAP_STOCK;
+    if (heap > AUDIO_HEAP_MAX) { _snprintf_s(b.why, sizeof(b.why), _TRUNCATE, "its slots would need a %llu MiB audio heap, more than SISCO gives", heap >> 20); return b; }
+    b.heapBytes = (uint32_t)heap; b.ok = true;
+    return b;
+}
+static WaveBuild WaveslotsBuild(const char* s, size_t n, int want, char* out, size_t cap) {
+    WaveBuild b = {};
+    char* live = XmlLive(s, n);
+    if (!live) { strcpy_s(b.why, "no memory"); return b; }
+    b = WaveslotsScan(s, live, n, want, out, cap);
+    HeapFree(GetProcessHeap(), 0, live);
+    return b;
+}
+static char* ReadWhole(const char* path, size_t* n, size_t max) {
+    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    DWORD sz = GetFileSize(h, NULL), got = 0;
+    char* b = sz != INVALID_FILE_SIZE && sz <= max ? (char*)HeapAlloc(GetProcessHeap(), 0, sz + 1) : NULL;
+    if (b && (!ReadFile(h, b, sz, &got, NULL) || got != sz)) { HeapFree(GetProcessHeap(), 0, b); b = NULL; }
+    CloseHandle(h);
+    if (b) { b[sz] = 0; *n = sz; }
+    return b;
+}
+static bool FileIs(const char* p) { DWORD a = GetFileAttributesA(p); return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY); }
+// The slot file driverSettings.xml names, as a path under pc\audio (WaveSlotsConfig value="audio:/config/waveslots.xml"
+// in every install seen); "config\waveslots.xml", the game's default, when it names none. A value outside audio:/, or
+// one SISCO cannot read as a plain file name, is refused.
+static bool DriverWaveslotsLive(const char* s, size_t n, char* out, size_t cap, char* why, size_t whyCap) {
+    strcpy_s(out, cap, "config\\waveslots.xml");
+    const char* end = s + n;
+    const char* k = s ? MemFind(s, end, "<WaveSlotsConfig") : NULL;
+    if (!k) return true;
+    const char* v = MemFind(k, end, "value=\"");
+    const char* ve = v ? (const char*)memchr(v + 7, '"', end - v - 7) : NULL;
+    if (!ve) { _snprintf_s(why, whyCap, _TRUNCATE, "driverSettings.xml has a WaveSlotsConfig SISCO cannot read"); return false; }
+    v += 7;
+    size_t len = (size_t)(ve - v);
+    if (len <= 7 || _strnicmp(v, "audio:/", 7) || len - 7 >= cap) { _snprintf_s(why, whyCap, _TRUNCATE, "driverSettings.xml puts the slot file outside audio:/"); return false; }
+    for (size_t i = 7; i < len; i++) {
+        char ch = v[i];
+        bool okc = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.' || ch == '/';
+        if (!okc || (ch == '.' && i + 1 < len && v[i + 1] == '.')) { _snprintf_s(why, whyCap, _TRUNCATE, "driverSettings.xml names a slot file SISCO will not follow"); return false; }
+        out[i - 7] = ch == '/' ? '\\' : ch;
+    }
+    out[len - 7] = 0;
+    return true;
+}
+static bool DriverWaveslots(const char* s, size_t n, char* out, size_t cap, char* why, size_t whyCap) {
+    if (!s) return DriverWaveslotsLive(NULL, 0, out, cap, why, whyCap);
+    char* live = XmlLive(s, n);
+    if (!live) { strcpy_s(out, cap, "config\\waveslots.xml"); _snprintf_s(why, whyCap, _TRUNCATE, "no memory to read driverSettings.xml"); return false; }
+    bool ok = DriverWaveslotsLive(live, n, out, cap, why, whyCap);
+    HeapFree(GetProcessHeap(), 0, live);
+    return ok;
+}
+// Before the install: the sites checked, the game's slot file read (FusionFix's update\ copy when FusionFix is there to
+// serve it, else pc\), the extra slots added, the result written to pc\audio\config\waveslots_sisco.xml only if it
+// changed, and read back.
+static void PlanEngineSlots(const CoreSites& c, const char* gameDir) {
+    EnginePlan& p = g_enginePlan; memset(&p, 0, sizeof(p));
+    if (!EngineSitesMatch(c, p.why, sizeof(p.why))) return;
+    char ffa[MAX_PATH], ffb[MAX_PATH], ffc[MAX_PATH], upd[MAX_PATH], pcf[MAX_PATH], dst[MAX_PATH], tmp[MAX_PATH], dsu[MAX_PATH], dsp[MAX_PATH], rel[64];
+    // Every name built here must fit: a truncated one would be written, read back and handed to the game as whole.
+    int cut = 0;
+    cut |= _snprintf_s(ffa, MAX_PATH, _TRUNCATE, "%s\\plugins\\GTAIV.EFLC.FusionFix.asi", gameDir) < 0;
+    cut |= _snprintf_s(ffb, MAX_PATH, _TRUNCATE, "%s\\GTAIV.EFLC.FusionFix.asi", gameDir) < 0;
+    cut |= _snprintf_s(ffc, MAX_PATH, _TRUNCATE, "%s\\scripts\\GTAIV.EFLC.FusionFix.asi", gameDir) < 0;
+    cut |= _snprintf_s(dsu, MAX_PATH, _TRUNCATE, "%s\\update\\pc\\audio\\config\\driverSettings.xml", gameDir) < 0;
+    cut |= _snprintf_s(dsp, MAX_PATH, _TRUNCATE, "%s\\pc\\audio\\config\\driverSettings.xml", gameDir) < 0;
+    cut |= _snprintf_s(dst, MAX_PATH, _TRUNCATE, "%s\\pc\\audio\\config\\waveslots_sisco.xml", gameDir) < 0;
+    cut |= _snprintf_s(tmp, MAX_PATH, _TRUNCATE, "%s\\pc\\audio\\config\\waveslots_sisco.tmp", gameDir) < 0;
+    if (cut) { _snprintf_s(p.why, sizeof(p.why), _TRUNCATE, "the game's folder path is too long for the slot file's name"); return; }
+    // FusionFix serves the update folder over the pc folder, from whichever folder the ASI loader took it.
+    bool ff = GetModuleHandleA("GTAIV.EFLC.FusionFix.asi") || FileIs(ffa) || FileIs(ffb) || FileIs(ffc);
+    size_t n = 0, en = 0;
+    char* ds = ReadWhole(ff && FileIs(dsu) ? dsu : dsp, &n, 1u << 20);
+    bool named = DriverWaveslots(ds, ds ? n : 0, rel, sizeof(rel), p.why, sizeof(p.why));
+    if (ds) HeapFree(GetProcessHeap(), 0, ds);
+    if (!named) return;
+    cut |= _snprintf_s(upd, MAX_PATH, _TRUNCATE, "%s\\update\\pc\\audio\\%s", gameDir, rel) < 0;
+    cut |= _snprintf_s(pcf, MAX_PATH, _TRUNCATE, "%s\\pc\\audio\\%s", gameDir, rel) < 0;
+    if (cut) { _snprintf_s(p.why, sizeof(p.why), _TRUNCATE, "the game's folder path is too long for the slot file's name"); return; }
+    bool fromUpd = ff && FileIs(upd);
+    _snprintf_s(p.from, sizeof(p.from), _TRUNCATE, "%spc\\audio\\%s", fromUpd ? "update\\" : "", rel);
+    n = 0;
+    char* text = ReadWhole(fromUpd ? upd : pcf, &n, 1u << 20);
+    if (!text) { _snprintf_s(p.why, sizeof(p.why), _TRUNCATE, "SISCO could not read %s", p.from); return; }
+    size_t cap = n + 256u * ENGINE_SLOTS + 4096;
+    char* out = (char*)HeapAlloc(GetProcessHeap(), 0, cap);
+    WaveBuild b = {};
+    if (out) b = WaveslotsBuild(text, n, ENGINE_SLOTS, out, cap); else strcpy_s(b.why, "no memory");
+    bool ok = b.ok;
+    if (!ok) _snprintf_s(p.why, sizeof(p.why), _TRUNCATE, "%s: %s", p.from, b.why);
+    if (ok) {
+        char* was = ReadWhole(dst, &en, 2u << 20);
+        bool same = was && en == b.outN && !memcmp(was, out, en);
+        if (was) HeapFree(GetProcessHeap(), 0, was);
+        if (!same) {
+            HANDLE h = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+            DWORD w = 0;
+            ok = h != INVALID_HANDLE_VALUE && WriteFile(h, out, (DWORD)b.outN, &w, NULL) && w == b.outN;
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+            ok = ok && MoveFileExA(tmp, dst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+            if (!ok) DeleteFileA(tmp);
+        }
+        was = ok ? ReadWhole(dst, &en, 2u << 20) : NULL;
+        ok = was && en == b.outN && !memcmp(was, out, en);
+        if (was) HeapFree(GetProcessHeap(), 0, was);
+        if (!ok) _snprintf_s(p.why, sizeof(p.why), _TRUNCATE, "SISCO could not write pc\\audio\\config\\waveslots_sisco.xml");
+    }
+    HeapFree(GetProcessHeap(), 0, text);
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+    if (!ok) return;
+    p.ready = true; p.before = b.before; p.slots = b.after; p.fileSlots = b.counted; p.heapBytes = b.heapBytes;
+}
+// The writes, all or nothing: every reference to the table, the limit, both heap sizes, and the slot file's reader last.
+static bool InstallEngineSlots(const CoreSites& c, const EnginePlan& p) {
+    char why[120];
+    if (!p.ready) { SiteSet(S_ENGINE, ST_OFF_DISABLED, "%s", p.why[0] ? p.why : "not prepared"); return false; }
+    if (!EngineSitesMatch(c, why, sizeof(why))) { SiteSet(S_ENGINE, ST_OFF_MISMATCH, "%s", why); return false; }
+    struct Undo { uintptr_t at; uint8_t old[8]; int n; } undo[24];
+    int nu = 0; bool ok = true;
+    auto put = [&](uintptr_t at, const void* v, int n) {
+        if (!ok || nu >= 24) { ok = false; return; }
+        memcpy(undo[nu].old, (const void*)at, n); undo[nu].at = at; undo[nu].n = n;
+        if (WriteCode(at, v, n)) nu++; else ok = false;
+    };
+    for (int i = 0; i < c.audioRefN; i++) {
+        uint32_t nv = (uint32_t)(uintptr_t)g_engineTable + c.audioRefs[i].field;
+        put((uintptr_t)((intptr_t)c.audioRefs[i].at + c.audioRefShift), &nv, 4);
+    }
+    if (p.slots > AUDIO_SLOTS_STOCK) { uint8_t lim = (uint8_t)p.slots; put(c.audioSlotCap + 2, &lim, 1); }
+    if (p.heapBytes > AUDIO_HEAP_STOCK) { put(c.audioHeap + 1, &p.heapBytes, 4); put(c.audioHeapLow + 1, &p.heapBytes, 4); }
+    uint8_t rd[6]; WaveReaderBytes(c, true, rd); put(c.waveReader, rd, 6);          // last: the loader reads SISCO's file
+    if (!ok) {
+        for (int i = nu - 1; i >= 0; i--) WriteCode(undo[i].at, undo[i].old, undo[i].n);
+        SiteSet(S_ENGINE, ST_OFF_ERROR, "a write failed, and everything written was put back"); return false;
+    }
+    g_engineOn = true;
+    SiteSet(S_ENGINE, ST_ON, "%d -> %d, audio heap %u -> %u MiB", p.before, p.slots, AUDIO_HEAP_STOCK >> 20,
+            (p.heapBytes > AUDIO_HEAP_STOCK ? p.heapBytes : AUDIO_HEAP_STOCK) >> 20);
+    return true;
+}
+// Once a second: a new peak of engine sounds held at once, over the game's own slots, goes on the log. That is the
+// raise doing its work, and it is what sizes ENGINE_SLOTS for the next version.
+static void EngineSlotTick() {
+    if (!g_engineOn) return;
+    uint32_t n = 0; RdU32(g_cs.audioSlots, &n);
+    if (n > ENGINE_SLOTS_MAX) n = ENGINE_SLOTS_MAX;
+    int held = 0;
+    for (uint32_t i = 0; i < n; i++) if (*(volatile uint32_t*)(g_engineTable + 16 * i + 8)) held++;
+    if (held <= g_enginePeak) return;
+    g_enginePeak = held;
+    if (held > g_enginePlan.before) SisLog("audio", "%d engine sounds held at once, more than the %d slots the game had without SISCO", held, g_enginePlan.before);
+}
+
+// The engine-sound slots, for the log. The game fills a table at startup by asking its slot file for STREAM_ENGINE_1,
+// _2 and so on until one is not declared, stopping at the limit in its own loop as well, and a car holds a slot per
+// engine sound bank until the car is deleted. With SISCO's raise in, the line gives what the game resolved against
+// what SISCO declared, the count its loader read (which names the file it read) and the heap it got, and why a figure
+// falls short. Without it, SISCO reads the game's own figures and writes nothing: stock is 15 declared under a limit
+// of 25, and any other figure is another mod's raise.
 static void AudioNote(const CoreSites& c, char* out, size_t outCap) {
     uint8_t ins[3] = { 0 }, heap[5] = { 0 };
     uint32_t slots = 0;
@@ -1611,10 +1915,23 @@ static void AudioNote(const CoreSites& c, char* out, size_t outCap) {
     }
     uint32_t limit = ins[2], heapBytes = 0;
     memcpy(&heapBytes, heap + 1, 4);
-    bool stockHeap = heapBytes == 0x7E00000u || heapBytes == 0x7300000u;   // 126 MiB, or 115 on a machine with little RAM
+    if (g_engineOn) {                // the count is the game's own, after it read its slot file: the proof of which one it read
+        uint32_t summed = 0, hp = 0; SIZE_T got = 0; uint8_t rd[6];
+        RdU32(c.waveSummed, &summed); RdU32(c.audioHeapPtr, &hp); WaveReaderBytes(c, true, rd);
+        __try { if (hp) got = HeapSize(GetProcessHeap(), 0, (const void*)(uintptr_t)hp); } __except (EXCEPTION_EXECUTE_HANDLER) { got = 0; }
+        const char* why = slots == (uint32_t)g_enginePlan.slots ? ""
+                        : !BytesEq(c.waveReader, rd, 6) ? ": the slot file's reader was changed after SISCO set it"
+                        : summed != (uint32_t)g_enginePlan.fileSlots ? ": the game read another slot file than waveslots_sisco.xml"
+                        : ": the game read waveslots_sisco.xml but found fewer engine slots in it";
+        _snprintf_s(out, outCap, _TRUNCATE, "%u engine sound slots of the %d SISCO declared (the game's own file %d), limit %u; the loader read %u slots "
+                    "(SISCO's file has %d), audio heap %u MiB set, %u MiB allocated%s",
+                    slots, g_enginePlan.slots, g_enginePlan.before, limit, summed, g_enginePlan.fileSlots, heapBytes >> 20, (unsigned)(got >> 20), why);
+        return;
+    }
+    bool stockHeap = heapBytes == AUDIO_HEAP_STOCK || heapBytes == AUDIO_HEAP_STOCK_LOW;
     _snprintf_s(out, outCap, _TRUNCATE, "%u engine sound slots, the game's own limit %u, audio heap %u MiB%s",
                 slots, limit, heapBytes >> 20,
-                limit != 25 || !stockHeap ? ": another mod has changed them"
+                limit != AUDIO_SLOTS_STOCK || !stockHeap ? ": another mod has changed them"
                 : slots && slots < limit ? "; a distinct car model past that many near you plays no engine sound" : "");
 }
 
@@ -1652,7 +1969,7 @@ static bool PoolUnmanaged() {
 static void SisSize(int64_t xMb) {
     g_sized = true;
     g_carHeld = false;
-    char audio[200]; AudioNote(g_cs, audio, sizeof(audio));
+    char audio[480]; AudioNote(g_cs, audio, sizeof(audio));
     SisLog("audio", "%s", audio);
     // The sliders decide how much world the game asks for, so no two reports compare without them. Read only.
     g_setView = g_setDetail = g_setCars = 0xFFFFFFFFu;
@@ -1704,7 +2021,6 @@ static void SisSize(int64_t xMb) {
                       : !g_fixInstalled ? "the release-queue fix is not in"
                       : !g_linkFixInstalled ? "the link-pool lock fix is not in"
                       : g_site[S_ARENA_SIZE].state != ST_ON ? "the streaming arena was not raised"
-                      : g_capNote[0] ? g_capNote
                       : mrSlot ? "your own -memrestrict sets the budget, and the game does not read the table then"
                       : PoolUnmanaged() ? (g_dxvk < 0 ? "SISCO never saw Direct3DCreate9, so -managed was never written and the game runs its pool unmanaged"
                                                      : "the game is not using Direct3D managed resources (-unmanaged or -nominimize is set)") : NULL;
@@ -1717,7 +2033,7 @@ static void SisSize(int64_t xMb) {
     g_car.addr = g_cs.vehBudget; g_ped.addr = g_cs.pedBudget;
     if (lowRam) { g_car.target = car; g_ped.target = ped; }
     else {
-        uint32_t wantCar = CarPedFor(CAR_STOCK, t, tStock), wantPed = CarPedFor(PED_STOCK, t, tStock);
+        uint32_t wantCar = CarPedFor(CAR_STOCK, CAR_FULL, t, tStock), wantPed = CarPedFor(PED_STOCK, PED_FULL, t, tStock);
         // The car budget is only worth raising as far as there are slots to hold the models it pays for.
         if (g_site[S_VSTRUCT].state != ST_ON && wantCar > CAR_NO_POOL) { wantCar = CAR_NO_POOL; g_carHeld = true; }
         g_car.on = g_ped.on = true;
@@ -1737,14 +2053,15 @@ static void SisSize(int64_t xMb) {
     else if (!wrote) strcpy_s(held, " NOT WRITTEN");
     _snprintf_s(g_sizeNote, sizeof(g_sizeNote), _TRUNCATE,
                 "DXVK%s; card budget %lld MB%s, render targets %lld MB, others %d MB%s: budget %d MB (the card allows %d, the game's "
-                "own %d%s%s)%s; car %u MB, ped %u MB%s%s%s", saw, bMb, vmNote, xMb, OtherMb(xMb),
+                "own %d%s%s)%s%s; car %u MB, ped %u MB%s%s%s", saw, bMb, vmNote, xMb, OtherMb(xMb),
                 g_extraStreaming ? ", FusionFix's ExtraStreamingMemory assumed (the credit function is hooked)" : "", t, tVram,
                 tStock, wineCap ? "; 2000 is the most SISCO asks for on Wine with a layout this fragmented, in this version" : "",
                 keptCell ? "; a larger value already in the table kept" : "", held,
+                needs || !g_cs.poolMode ? "" : "; pool managed (read back from the game)",
                 g_car.target / 1000000, g_ped.target / 1000000,
                 lowRam ? " (the game's low-memory values kept)"
                        : g_carHeld ? " (car held where the game's own VehicleStruct pool can use it)" : "",
-                car > CarPedFor(CAR_STOCK, t, tStock) || ped > CarPedFor(PED_STOCK, t, tStock) ? " (a larger value another mod set kept)" : "", as);
+                car > CarPedFor(CAR_STOCK, CAR_FULL, t, tStock) || ped > CarPedFor(PED_STOCK, PED_FULL, t, tStock) ? " (a larger value another mod set kept)" : "", as);
     SisLog("size", "%s", g_sizeNote);
 }
 // The render targets grew (the player raised the resolution): lower the budget to what the card allows now. Never raised.
@@ -1761,87 +2078,95 @@ static void SisResize(int64_t nowMs, int64_t xMb) {
     SisLog("size", "render targets now %lld MB at %lld s: budget %d -> %d MB", xMb, nowMs / 1000, before, t);
     TrafficFollow(t, g_sizedTStock);
 }
-// The verdict on a load: the load line, and the slow rule.
+// What the skip did, when it ends: how many presents were not made, and since when.
+static void PresentLine(int64_t nowMs, const char* where) {
+    SisLog("present", "presents go out again, %s: %ld were not made in the %lld s since the loading screen went up", where, g_skippedPresents,
+           g_ldUpMs > 0 ? (nowMs - g_ldUpMs) / 1000 : nowMs / 1000);
+}
+// The load line: how long the world took to build after the player appeared, to the render targets' last change.
 static void LoadVerdict(int64_t nowMs, bool ceiling) {
-    int64_t buildMs = ceiling ? nowMs - g_ldEdgeMs : g_ldChangeMs - g_ldEdgeMs;
-    g_loadBuildS = buildMs / 1000;
-    g_loadFps = -1;
-    if (g_cs.frameCounter && !ceiling && buildMs >= 1000 && g_ldChangeFrame > g_worldFrame)
-        g_loadFps = (int)(((int64_t)(g_ldChangeFrame - g_worldFrame) * 1000) / buildMs);
-    char rate[64] = "";
-    if (g_loadFps >= 0) _snprintf_s(rate, sizeof(rate), _TRUNCATE, " at %d fps", g_loadFps);
-    else if (!g_cs.frameCounter) strcpy_s(rate, " (the frame rate is not read on this build)");
+    g_loadBuildS = (ceiling ? nowMs - g_ldEdgeMs : g_ldChangeMs - g_ldEdgeMs) / 1000;
     if (ceiling) SisLog("load", "the render targets never held for %d s in the %lld s since the player appeared: the build's end could not be seen", LOAD_STEADY_TICKS, g_loadBuildS);
-    else SisLog("load", "the world built in %lld s after the player appeared%s%s", g_loadBuildS, rate,
-                g_presentImmediate ? " (presenting without waiting for VSync)" : "");
-    // A slow load with -managed in effect is the wait players report: 2 s when nothing holds the build back, 27 to 61 s
-    // behind VSync or a cap (runs L4, L7, L10). Said here, named as far as SISCO can see, and written by the worker
-    // into a file beside the log.
-    if (!g_managedOn || g_loadBuildS <= LOAD_SLOW_S) return;
-    char seen[300];
-    if (g_frameCap > 0) _snprintf_s(seen, sizeof(seen), _TRUNCATE, "DXVK's own frame cap of %d fps (%s)", g_frameCap, g_frameCapFrom);
-    else if (g_forcedInterval >= 1) _snprintf_s(seen, sizeof(seen), _TRUNCATE, "VSync forced in DXVK's config (d3d9.presentInterval %d), which SISCO cannot present past", g_forcedInterval);
-    else if (RtssLoaded()) strcpy_s(seen, "RTSS is loaded, and a frame limit set there is the likeliest cause");
-    else if (IsWine()) strcpy_s(seen, "nothing SISCO can see: on a Steam Deck its own frame limit (the Quick Access menu) is the usual one; "
-                        "on a desktop, MangoHud's limiter or the driver's; otherwise a limiter outside the game");
-    else strcpy_s(seen, "nothing SISCO can see: the driver's control panel (a Max Frame Rate for GTAIV.exe) or a limiter that hooks the game; "
-                        "if no limit is set anywhere, this machine renders the world that slowly and this note is a false alarm");
-    _snprintf_s(g_slowLoadNote, sizeof(g_slowLoadNote), _TRUNCATE,
-                "the world took %lld s to build after the player appeared%s, with -managed in effect (about 2 s when nothing holds it back). "
-                "That is the wait a frame-rate limit causes: %s. Lift the limit while the game loads, or set Budget=0 in SISCO.ini.",
-                g_loadBuildS, rate, seen);
-    SisLog("slowload", "%s", g_slowLoadNote);
-    InterlockedExchange(&g_slowLoadPending, 1);
+    else SisLog("load", "the world built in %lld s after the player appeared", g_loadBuildS);
 }
 // Once a second from the worker, before the sizing: the load being timed, and the presents while its world builds.
 static void LoadTick(int64_t nowMs, bool loadingUp, bool playerIn, bool ready, int64_t xMb) {
-    uint32_t fr = 0; bool haveFrame = g_cs.frameCounter && RdU32(g_cs.frameCounter, &fr);
     if (loadingUp) {
-        // A load begins (or the menu is up): a load still being timed is dropped, and its presents go back to the game's.
-        if (g_ldEdgeMs) { g_ldEdgeMs = 0; g_presentImmediate = 0; }
-        g_ldUp = true; g_ldPending = false;
+        // A loading screen is up: most of its presents are not made either (the comment at HkSwapPresent), one every
+        // PRESENT_SHOW_LOADING_MS going through. A load still being timed is dropped.
+        if (!g_ldUp) {
+            g_ldUpMs = nowMs; g_ldEdgeMs = 0;
+            g_skippedPresents = 0; g_lastShownMs = 0;
+            SisLog("loading", "a loading screen is up, %lld s after launch", nowMs / 1000);
+        }
+        if (g_swapVtblHooked) { g_skipRtEnd = 0; g_showMs = PRESENT_SHOW_LOADING_MS; g_presentSkip = 1; }
+        g_ldUp = true; g_ldPending = false; g_menuTicks = 0;
         return;
     }
     if (g_ldUp) { g_ldUp = false; g_ldPending = true; }
     if (g_ldPending) {
-        if (!playerIn) return;           // the main menu: the streamer is up and the flag down, but nobody is in the world
-        g_ldPending = false;
-        g_ldEdgeMs = g_worldMs = g_ldChangeMs = nowMs; g_worldFrame = g_ldChangeFrame = haveFrame ? fr : 0;
+        if (!playerIn) {                 // the flag is down and nobody is in the world: the player can follow a tick later, or this is the menu
+            if (++g_menuTicks >= 2 && g_presentSkip) { g_presentSkip = 0; PresentLine(nowMs, "the loading screen came down to the menu"); }
+            return;
+        }
+        g_ldPending = false; g_menuTicks = 0;
+        g_ldEdgeMs = g_worldMs = g_ldChangeMs = nowMs;
         g_ldX = ready ? xMb : -1; g_ldSteady = 0; g_ldVerdict = false; g_loadN++;
-        if (g_swapVtblHooked) { g_immediatePresents = 0; g_presentImmediate = 1; }
+        if (g_swapVtblHooked) {
+            if (!g_presentSkip) { g_skippedPresents = 0; g_lastShownMs = 0; }
+            int64_t endMb = ready && xMb < RT_PART_BUILT_MB ? (2 * xMb > RT_FINISHED_MIN_MB ? 2 * xMb : RT_FINISHED_MIN_MB)
+                          : ready && xMb < RT_WORLD_AT_EDGE_MB ? 2 * xMb : 0;   // under 400 MB a loading screen's set; above it the world's already
+            g_skipRtEnd = (LONG)endMb; g_skipEndedRt = 0;
+            g_showMs = PRESENT_SHOW_MS; g_presentSkip = 1;
+        }
         g_worldLogged = true;
         // The game's loading flag drops when the player entity exists, while the world still streams in around it
         // and the visible loading screen stays up until it has: the phase timed from here is that build.
-        SisLog("world", "the player exists and the game's loading flag is down; the world builds from here (the loading screen may still show); render targets %lld MB%s",
-               ready ? xMb : 0, ready ? "" : " (not built yet)");
+        SisLog("world", "the player exists and the game's loading flag is down, %lld s after the loading screen went up; the world builds from here (the loading screen may still show); render targets %lld MB%s",
+               g_ldUpMs > 0 ? (nowMs - g_ldUpMs) / 1000 : 0, ready ? xMb : 0, ready ? "" : " (not built yet)");
         return;
     }
     if (!g_ldEdgeMs) return;
     int64_t x = ready ? xMb : -1;
-    if (x != g_ldX) { g_ldX = x; g_ldSteady = 0; g_ldChangeMs = nowMs; g_ldChangeFrame = haveFrame ? fr : 0; }
+    if (x != g_ldX) { g_ldX = x; g_ldSteady = 0; g_ldChangeMs = nowMs; }
     else g_ldSteady++;
     if (x >= 0 && (g_rtMin <= 0 || x < g_rtMin)) g_rtMin = x;
     // A set under 128 MB that is not twice the smallest seen is a part-built stage that can hold for a whole build
     // (the sizing's rule, at SETTLE_LONG_TICKS above): the build is not over until it has held that long.
-    bool partBuilt = x < 128 && x < 2 * g_rtMin;
+    bool partBuilt = PartBuilt(x);
     bool built = x >= RT_FINISHED_MIN_MB && g_ldSteady >= LOAD_STEADY_TICKS && (!partBuilt || g_ldSteady >= SETTLE_LONG_TICKS);
     bool ceiling = nowMs >= g_ldEdgeMs + LOAD_CEILING_MS;
-    if (!g_ldVerdict && (built || ceiling)) { g_ldVerdict = true; LoadVerdict(nowMs, ceiling && !built); }
-    if (g_ldVerdict && nowMs >= g_ldEdgeMs + LOAD_HOLD_MS) {
-        if (g_presentImmediate) {
-            g_presentImmediate = 0;
-            SisLog("present", "VSync handed back %lld s after the player appeared: %ld presents went out immediately while the world built",
-                   (nowMs - g_ldEdgeMs) / 1000, g_immediatePresents);
-        }
-        g_ldEdgeMs = 0;
+    // The skip ends once the build's last stage is on screen: a set past the first stage seen (twice it) that has
+    // held one tick, or a set of at least 128 MB that has held two (a middle stage can be the first seen, 156 MB at
+    // 4K in run S2, and it read as finished after one), or any set of at least RT_FINISHED_MIN_MB that has held
+    // SKIP_MAX_STEADY ticks (a machine whose first stage was never seen reads as part-built for far longer), or the
+    // ceiling: presents must go out again once the game is on screen.
+    LONG endedRt = InterlockedExchange(&g_skipEndedRt, 0);
+    if (endedRt) {
+        char where[128];
+        _snprintf_s(where, sizeof(where), _TRUNCATE, "on the first present with the world's render targets (%ld MB), %lld s after the player appeared",
+                    endedRt, (nowMs - g_ldEdgeMs) / 1000);
+        PresentLine(nowMs, where);
+    }
+    bool past = x >= RT_FINISHED_MIN_MB && g_rtMin > 0 && x >= 2 * g_rtMin;
+    if (g_presentSkip && ((past && g_ldSteady >= 1) || (x >= RT_PART_BUILT_MB && g_ldSteady >= 2) || (x >= RT_FINISHED_MIN_MB && g_ldSteady >= SKIP_MAX_STEADY) || ceiling)) {
+        g_presentSkip = 0;
+        char where[64]; _snprintf_s(where, sizeof(where), _TRUNCATE, "%lld s after the player appeared", (nowMs - g_ldEdgeMs) / 1000);
+        PresentLine(nowMs, where);
+    }
+    if (!g_ldVerdict && (built || ceiling)) {
+        g_ldVerdict = true;
+        LoadVerdict(nowMs, ceiling && !built);
+        g_presentSkip = 0;                                                  // a backstop: the skip has ended by now
+        g_ldEdgeMs = 0;                                                     // this load is done with
     }
 }
 // Once a second, from the worker thread. lMb: the largest free block of the address space, in MB.
 static void SisTick(int64_t nowMs, int64_t lMb) {
     int64_t xMb = 0;
-    g_tickMs = nowMs;
     uint32_t loading = 0; RdU32(g_cs.loading, &loading);
     bool loadingUp = (loading & 0xFF) != 0;
+    EngineSlotTick();
     bool ready = WorldReady(&xMb), playerIn = PlayerInWorld();
     LoadTick(nowMs, loadingUp, playerIn, ready, xMb);
     if (!g_sized) {
@@ -1856,7 +2181,7 @@ static void SisTick(int64_t nowMs, int64_t lMb) {
         if (g_rtMin <= 0 || xMb < g_rtMin) g_rtMin = xMb;
         if (xMb != g_settleX) { g_settleX = xMb; g_settleTicks = 0; return; }
         if (++g_settleTicks < SETTLE_TICKS) return;
-        if (xMb < 128 && xMb < 2 * g_rtMin && g_settleTicks < SETTLE_LONG_TICKS) return;   // part-built, see SETTLE_LONG_TICKS
+        if (PartBuilt(xMb) && g_settleTicks < SETTLE_LONG_TICKS) return;   // part-built, see SETTLE_LONG_TICKS
         SisSize(xMb);
         return;
     }
@@ -1984,20 +2309,10 @@ static bool ParamReadersMatch(const CoreSites& c) {
            FormEq(c.rdVidmem, F_LOAD_EAX, (uint32_t)c.prmVidmem);
 }
 // Everything SISCO does at load, in order.
-struct SisLoadResult { bool queue, lock, race, arena, d3d, params; };
-// The frame counter is read for the load line only, and only while the instruction that advances it is where SISCO
-// expects it (add dword ptr [counter], 1, its operand rebased as the loader did): a build that moved either would
-// give a rate of nothing in particular.
-static void PinFrameCounter(CoreSites& c) {
-    if (!c.frameCounter || !c.frameInc) { c.frameCounter = 0; return; }
-    uint8_t inc[7] = { 0x83, 0x05, 0, 0, 0, 0, 0x01 };
-    uint32_t a = (uint32_t)c.frameCounter; memcpy(inc + 2, &a, 4);
-    if (!BytesEq(c.frameInc, inc, 7)) c.frameCounter = 0;
-}
+struct SisLoadResult { bool queue, lock, race, arena, engine, d3d, params; };
 static SisLoadResult SisInstall(const CoreSites& c) {
     SisLoadResult r = {};
     g_cs = c;
-    PinFrameCounter(g_cs);
     if (g_set.fixes) {
         r.queue = InstallQueueFix(c);
         r.lock = InstallLinkLockFix(c);
@@ -2014,6 +2329,7 @@ static SisLoadResult SisInstall(const CoreSites& c) {
     // world. Raising it always is measured to cost nothing that matters: without DXVK the budget stays the game's
     // own, the extra room is never the binding limit, and a texture pack can exhaust the stock arena by itself.
     if (g_set.limits) r.arena = RaiseArena(c, 400);
+    if (g_set.limits) r.engine = InstallEngineSlots(c, g_enginePlan);   // PlanEngineSlots ran first, in SIS.cpp
     r.params = ParamReadersMatch(c);
     if (r.params) r.d3d = InstallD3DHook(c);
     else SiteSet(S_D3D_IAT, ST_OFF_MISMATCH, "a launch-option reader differs: nothing is set at Direct3DCreate9");
@@ -2041,12 +2357,14 @@ static CoreSites Sites1080() {
     c.poolMode = VA(D_POOL_MODE);
     c.memRestrictTest = VA(A_MEMRESTRICT_TEST); c.prmNoMemRestrict = VA(D_PARAM_NOMEMRESTRICT); c.prmMemRestrict = VA(D_PARAM_MEMRESTRICT);
     c.setView = VA(D_SET_VIEW); c.setDetail = VA(D_SET_DETAIL); c.setCars = VA(D_SET_CARS);
-    c.frameCounter = VA(D_FRAME); c.frameInc = VA(A_FRAME_INC);
     c.table = VA(D_TABLE); c.quality = VA(D_QUALITY); c.rt0 = VA(D_RT0); c.cacheV = VA(D_CACHE) + C_V;
     c.streamerN = VA(D_STREAMER) + 4; c.loading = VA(D_LOADING); c.vehBudget = VA(D_VEH_BUDGET); c.pedBudget = VA(D_PED_BUDGET);
     c.playerInfo = VA(D_PLAYERINFO);
     c.gafm = VA(A_GAFM);
     c.audioSlotCap = VA(A_AUDIO_SLOT_CAP); c.audioHeap = VA(A_AUDIO_HEAP); c.audioSlots = VA(D_AUDIO_SLOTS);
+    c.audioHeapLow = VA(A_AUDIO_HEAP_LOW); c.audioHeapPtr = VA(D_AUDIO_HEAP_PTR); c.audioTable = VA(D_AUDIO_TABLE);
+    c.wavePath = VA(D_WAVE_PATH); c.waveReader = VA(A_WAVE_READER); c.waveSummed = VA(D_WAVE_SUMMED);
+    c.audioRefs = kEngineRefs1080; c.audioRefN = 15; c.audioRefShift = (intptr_t)VA(0x400000u) - 0x400000;
     return c;
 }
 // The Complete Edition. Same fields, its own addresses, and the shapes its compiler chose.
@@ -2072,12 +2390,14 @@ static CoreSites SitesCe() {
     c.poolMode = VA(CE_D_POOL_MODE);
     c.memRestrictTest = VA(CE_A_MEMRESTRICT_TEST); c.prmNoMemRestrict = VA(CE_D_PARAM_NOMEMRESTRICT); c.prmMemRestrict = VA(CE_D_PARAM_MEMRESTRICT);
     c.setView = VA(CE_D_SET_VIEW); c.setDetail = VA(CE_D_SET_DETAIL); c.setCars = VA(CE_D_SET_CARS);
-    c.frameCounter = 0; c.frameInc = 0;         // the Complete Edition's counter is not carried yet: no rate on its load line
     c.table = VA(CE_D_TABLE); c.quality = VA(CE_D_QUALITY); c.rt0 = VA(CE_D_RT0); c.cacheV = VA(CE_D_CACHE) + C_V;
     c.streamerN = VA(CE_D_STREAMER) + 4; c.loading = VA(CE_D_LOADING); c.vehBudget = VA(CE_D_VEH_BUDGET); c.pedBudget = VA(CE_D_PED_BUDGET);
     c.playerInfo = VA(CE_D_PLAYERINFO);
     c.gafm = VA(CE_A_GAFM);
     c.audioSlotCap = VA(CE_A_AUDIO_SLOT_CAP); c.audioHeap = VA(CE_A_AUDIO_HEAP); c.audioSlots = VA(CE_D_AUDIO_SLOTS);
+    c.audioHeapLow = VA(CE_A_AUDIO_HEAP_LOW); c.audioHeapPtr = VA(CE_D_AUDIO_HEAP_PTR); c.audioTable = VA(CE_D_AUDIO_TABLE);
+    c.wavePath = VA(CE_D_WAVE_PATH); c.waveReader = VA(CE_A_WAVE_READER); c.waveSummed = VA(CE_D_WAVE_SUMMED);
+    c.audioRefs = kEngineRefsCe; c.audioRefN = 14; c.audioRefShift = (intptr_t)VA(0x400000u) - 0x400000;
     return c;
 }
 // The two builds SISCO knows: 1.0.8.0 and the Complete Edition 1.2.0.59. Anything else: log why and change nothing. Each

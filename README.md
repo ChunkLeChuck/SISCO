@@ -22,8 +22,9 @@ FusionFix's `d3d9.cfg` in the game folder must say `API = 1` under `[MAIN]`, whi
 running DXVK before. If you run DXVK as your own `d3d9.dll` instead of through FusionFix, rename the `vulkan.dll`
 from the download to `d3d9.dll` and use it in place of yours; it is the same file.
 
-To uninstall, delete `SISCO.asi` and `SISCO.ini`; `vulkan.dll` is only a newer DXVK and can stay. SISCO never writes
-to a game file, and every change it makes lives in memory for that one run.
+To uninstall, delete `SISCO.asi`, `SISCO.ini` and `pc\audio\config\waveslots_sisco.xml`; `vulkan.dll` is only a
+newer DXVK and can stay. SISCO never edits a game file: apart from that one file of its own, which the game reads
+only while SISCO is in, every change it makes lives in memory for that one run.
 
 It writes `plugins\SISCO.log`: a short, plain record of what it changed and what it decided. That file is the first
 thing to look at if something seems wrong, and the thing to attach to a bug report.
@@ -37,8 +38,8 @@ should only turn one off to find out which part of the mod is causing a problem.
 |---|---|
 | `Enabled=0` | everything. If the problem is still there, it is not SISCO (the `vulkan.dll` from the download stays in place; put your old one back to rule that out too) |
 | `Fixes=0` | the three bug fixes |
-| `Limits=0` | the bigger pools and the streaming arena |
-| `Budget=0` | the streaming budget, the traffic budgets and the brake |
+| `Limits=0` | the bigger pools, the streaming arena and the engine-sound slots |
+| `Budget=0` | the streaming budget, the traffic budgets, the brake, and the presents skipped while loading |
 
 Only the number `0` turns something off. A typo, or a word like `off`, leaves that part on, so you cannot break it
 by mistyping. The log records which switches were on every run, so send it with any report.
@@ -47,17 +48,17 @@ Turning `Limits` or `Fixes` off also stops the budget being raised, because a ra
 them. Every switch moves the game back towards how it runs without the mod.
 
 **VSync and frame-rate caps, and slow loading.** A raised budget needs the `-managed` launch option, and with it
-the world build after a load waits on every present: measured on a clean install, VSync alone (120 Hz) turned a
-2-second world build into 27 seconds, a 30 fps cap into 61, a 60 fps cap into 30, while the same build without
-`-managed` took 2 seconds under the 30 fps cap. So from the moment the player appears after a load SISCO presents
-without waiting for VSync until the world has built (and for at least 15 seconds), then hands VSync back; the log's
-`present` lines say so and count it. Frame-rate limiters are not covered by that, and neither is a VSync forced in
-DXVK's own config: SISCO reads `dxvk.conf` (and `DXVK_CONFIG_FILE`, `DXVK_CONFIG`) the way DXVK does, and a
-`maxFrameRate` cap or a `d3d9.presentInterval` there makes it leave `-managed` unset and the budget at the game's
-own, saying so. It cannot see RTSS's figure or the driver's cap, so if you use one of those, lift it while loading
-or set `Budget=0`. The log's `load` line times every build (on 1.0.8.0 with its frame rate), and when a build took
-over 20 seconds with the option in effect, SISCO writes `plugins\SISCO-SLOW-LOAD.txt`, a plain note of what it
-could see and what to do, and says the same on the log's `slowload` line.
+the game's loading waits on every present: DXVK holds its device lock through each present's wait, and every texture
+upload of the load queues behind it. Measured on a clean install with VSync on in the game menu, the load took
+82 seconds from launch to the world built with `-managed` and no SISCO, against 12 without `-managed`; under a 30 fps
+cap the old build took 90. So while a loading screen is up, and while the world builds after the player appears,
+SISCO does not make most presents at all: one goes through every 33 ms on a loading screen and every 100 ms while
+the world builds, so the screen still moves, and nothing that waits inside a present can hold the load. The same
+install then loaded in 10 seconds with VSync on and 17 under the 30 fps cap, with the raised budget. That was
+measured with VSync and with DXVK's own limiter; RTSS and the driver's limiter wait inside the same present, so they
+should be covered as well, but no run has tested them. The log's `loading` line says when each loading screen went up,
+the `world` line how long it was up before the player appeared, the `present` line how many presents were not made,
+and the `load` line how long the world took to build after that.
 
 ## What it changes
 
@@ -67,11 +68,12 @@ Every one of these is a number the game already has.
 |---|---|---|---|
 | streaming budget | 300 to 800 MB | up to 4000 MB, sized to your card | the reason the rest of this exists |
 | car models | 40 MB | 200 MB | measured: 7 different cars in traffic becomes 22 |
-| ped models | 50 MB | 200 MB | measured: 4 different people on the street becomes 7 |
+| ped models | 50 MB | 180 MB | more different people: in testing the game's own budget gave 4 ped models on the street, 200 MB gave 7 |
 | streaming arena | 160 MiB | 400 MiB | the workspace the streamer loads into |
 | drawable slots | 10,000 | 32,768 | when this pool fills, the game deadlocks |
 | list entries | 13,000 | 65,536 | when this pool runs dry, the game crashes |
 | VehicleStruct slots | 50 | 100 | more distinct cars need more of them |
+| engine sound slots | 15 | 48 | each different car engine near you needs one; past the last, a car is silent |
 
 SISCO tells DXVK from the game's own renderer by asking the Direct3D object itself, and reads DXVK's version from
 its module; the log's `direct3d` line says what it found. At sizing it also reads every raised value back from the
@@ -124,14 +126,20 @@ the city thins slightly instead of the game falling over.
 - **FusionFix**: works with it. When its ExtraStreamingMemory option is on, SISCO assumes FusionFix's larger memory
   credit when sizing; that combination has not been measured.
 - **DXVK**: required. The `vulkan.dll` in the download is 3.1.1, the version SISCO is tested against; the log
-  records the version it found, and a frame cap or a forced VSync in DXVK's own `dxvk.conf` holds the budget (see above).
+  records the version it found. VSync and frame limiters, DXVK's own included, do not slow loading (see above).
 - **Proton and the Steam Deck**: supported. Proton loads its own DXVK ahead of the game folder's `vulkan.dll`, so the
   download's DXVK is not used there and the log says which version ran. The 32-bit address space can be laid out
   differently under Wine (a Deck showed a largest free block of 269 MB with nothing loaded): where the largest free
   block at sizing is under 1 GB, SISCO asks for at most 2000 MB in this version; a desktop Linux machine whose layout
   reads like Windows is sized as Windows is. Either way the brake follows the layout it measures at sizing, and the
-  `size` and `brake` lines record it. The Deck's own frame limit, MangoHud's and the driver's are frame caps during
-  loads: lift them while loading, or set `Budget=0`.
+  `size` and `brake` lines record it. Presents are skipped during loads there as on Windows, so the Deck's own frame
+  limit should not slow loading either; that has not been measured on a Deck yet.
+- **revd and other engine-sound slot fixes**: SISCO does the same job, so you do not need them. If one is installed,
+  SISCO sees that it already changed the slots and leaves them to it; the log's `audio` line says so. SISCO never
+  edits the game's `waveslots.xml`: it writes its own `pc\audio\config\waveslots_sisco.xml` at start, built from
+  the game's file (FusionFix's `update` copy when FusionFix is installed, so your own slot edits are kept), and
+  points the game at it. Without SISCO the game reads its own file as before. The audio heap grows by exactly what
+  the slots need: 152 MiB for 48 over the stock file, where revd uses a fixed 192.
 - **Anything that sets the same values**: a larger value another mod already set always stands. SISCO only raises.
   A mod that sets a value back after SISCO loaded is seen at sizing, when SISCO reads every raised value back from
   the game: for the pools and the arena that raise then counts as refused and the budget stays the game's own; for
@@ -139,7 +147,7 @@ the city thins slightly instead of the game falling over.
   IVTweaker's MaxVehicleStruct hooks the pool's constructor rather than the size, so SISCO reads the count the pool
   was actually built with.
 - **Every site is verified before it is written.** SISCO compares the exact bytes it expects at each of the
-  twenty-one places it patches, and if one does not match, that feature stays off and the log says which and why. It never
+  places it patches, and if one does not match, that feature stays off and the log says which and why. It never
   half-installs: the queue fix in particular goes in completely or not at all, and rolls back if a write fails.
   The two Direct3D vtable slots it writes (CreateDevice and the swap chain's Present) are DXVK's, not the game's:
   each is read and chained, never compared against expected bytes, and written once.
