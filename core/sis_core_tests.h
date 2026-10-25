@@ -2,6 +2,8 @@
 // exercise is the code that ships, down to the instruction. The includer defines
 // CHECK and has initialised g_base, the clock and g_spillCs.
 
+#include "sis_core_traces.h"   // recorded runs the brake is replayed against (tools/brake_trace.py writes it)
+
 // ------------------------------------------------------------------ the release queue
 // A cache as the game lays it out (array at +0x148, count at +0x40148, a real critical section at +0x40760); the push
 // as 0x411450 has it (its first 7 bytes are the ones the fix checks); three 22-byte inline pushes with the cache's
@@ -359,12 +361,12 @@ static void TSizeReset(int dxvk, int64_t bootMb, uint32_t veh, uint32_t ped) {
     g_tSetView = 99; g_tSetDetail = 99; g_tSetCars = 50;
     g_cs.setView = (uintptr_t)&g_tSetView; g_cs.setDetail = (uintptr_t)&g_tSetDetail; g_cs.setCars = (uintptr_t)&g_tSetCars;
     g_cs.playerInfo = (uintptr_t)g_tPlayerInfo; g_cs.playerPedOff = 0x58Cu; TPlayerInWorld(true);
-    g_playerVidmemMb = 0;
+    g_playerVidmemMb = 0; g_vidmemSetMb = 0;
     g_sized = false; g_worldLogged = false; g_rtMin = 0; g_settleX = -1; g_settleTicks = 0;
     g_dxvk = dxvk; g_bootBudgetMb = bootMb; g_dxgiState = -1;   // no DXGI: the sizing uses the boot budget
     g_brakeOn = 0; g_brakeSt.t = 0; g_brakeSt.held = false; g_brakeCfg.floorMb = 800;
     g_car.on = g_ped.on = false;
-    g_car.target = g_car.written = g_car.fromOther = g_ped.target = g_ped.written = g_ped.fromOther = 0;
+    g_car.target = g_car.written = g_car.fromOther = g_ped.target = g_ped.written = g_ped.fromOther = g_car.sized = g_ped.sized = 0;
     // The budget is only raised behind the two pools, the queue fix and the arena; these cases are about the sizing
     // itself, so they start from an install where all four went in. That they were refused is its own test below.
     SiteSet(S_LINK_SIZE, ST_ON, ""); SiteSet(S_SLOT_SIZE, ST_ON, ""); SiteSet(S_ARENA_SIZE, ST_ON, "");
@@ -380,8 +382,9 @@ static void TSizeReset(int dxvk, int64_t bootMb, uint32_t veh, uint32_t ped) {
     g_raised[S_SLOT_SIZE] = 32768; g_raised[S_LINK_SIZE] = 65536; g_raised[S_ARENA_SIZE] = 400u * 1024u; g_raised[S_VSTRUCT] = 100;
     g_dxvkVer[0] = g_dxvkVer[1] = g_dxvkVer[2] = -1;
     g_tWine = 0; g_wineNote[0] = 0; g_tAddrSpace.largest = g_tAddrSpace.total = 0; g_tAddrSpace.blocks = 0;
+    g_asView = 0; g_procMaps[0] = 0; g_tProcRoot = NULL;
     g_worldMs = 0; g_loadBuildS = 0;
-    g_ldUp = false; g_ldUpMs = 0; g_ldPending = true; g_ldEdgeMs = 0; g_ldX = -1; g_ldSteady = 0; g_ldVerdict = false; g_loadN = 0;   // as at the start: the next player is a load's edge
+    g_ldUp = false; g_ldUpMs = 0; g_ldPending = true; g_ldEdgeMs = 0; g_ldSettleMs = 0; g_ldX = -1; g_ldSteady = 0; g_ldVerdict = false; g_loadN = 0;   // as at the start: the next player is a load's edge
     g_presentSkip = 0; g_skippedPresents = 0; g_lastShownMs = 0; g_tPresentMs = -1;
     g_showMs = PRESENT_SHOW_MS; g_menuTicks = 0;
     g_skipRtEnd = 0; g_skipEndedRt = 0;
@@ -882,18 +885,20 @@ static void CoreTests() {
         g_d3dCalls = 0; g_dxvk = -1; g_bootBudgetMb = -1; g_dxgiState = 0; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_tD3D.dxvk = 1; g_tD3D.refs = 1;
         void* r = create(32);
         char want[16]; _snprintf_s(want, sizeof(want), _TRUNCATE, "%lld", g_bootBudgetMb > VIDMEM_MAX_MB ? (long long)VIDMEM_MAX_MB : g_bootBudgetMb);
-        CHECK(r == &g_tD3D && g_tD3DSdk == 32 && g_dxvk == 1 && g_tD3D.refs == 1 && strstr(g_d3dNote, "interop"),
+        CHECK(r == &g_tD3D && g_tD3DSdk == 32 && g_dxvk == 1 && g_tD3D.refs == 1 && !strncmp(g_d3dNote, "DXVK", 4) && !strstr(g_d3dNote, "assumed"),
               "Direct3D: DXVK detected through its interop interface, the reference given back (%ld): %s", g_tD3D.refs, g_d3dNote);
         CHECK(g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && g_tPrm[0] == 0, "Direct3D: -managed set, -unmanaged left alone");
-        CHECK(g_bootBudgetMb >= 512 && g_tPrm[2] == (uint32_t)(uintptr_t)g_vidmemArg && strcmp(g_vidmemArg, want) == 0,
-              "Direct3D: -availablevidmem = the card's budget, at most 8192: %s MiB", g_vidmemArg);
+        CHECK(g_dxgiState != 1 || (g_gpuName[0] && strstr(g_d3dNote, g_gpuName) && !strstr(g_d3dNote, "LUID")),
+              "Direct3D: the card DXGI picked is named on the direct3d line (%s): %s", g_gpuName, g_d3dNote);
+        CHECK(g_bootBudgetMb >= 512 && g_tPrm[2] == (uint32_t)(uintptr_t)g_vidmemArg && strcmp(g_vidmemArg, want) == 0 && g_vidmemSetMb == atoi(want),
+              "Direct3D: -availablevidmem = the card's budget, at most 8192: %s MiB (remembered as %d)", g_vidmemArg, g_vidmemSetMb);
         // (2) a second call passes straight through
         g_tPrm[1] = 0; r = create(31);
         CHECK(r == &g_tD3D && g_tD3DSdk == 31 && g_d3dCalls == 2 && g_tPrm[1] == 0, "Direct3D: later calls pass straight through");
         // (3) the player's options stand
         g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = 0x1234; g_tPrm[1] = 0; g_tPrm[2] = 0x5678;
         create(32);
-        CHECK(g_dxvk == 1 && g_tPrm[0] == 0x1234 && g_tPrm[1] == 0 && g_tPrm[2] == 0x5678, "Direct3D: the player's -unmanaged and -availablevidmem stand");
+        CHECK(g_dxvk == 1 && g_tPrm[0] == 0x1234 && g_tPrm[1] == 0 && g_tPrm[2] == 0x5678 && g_vidmemSetMb == 0, "Direct3D: the player's -unmanaged and -availablevidmem stand");
         g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = 0; g_tPrm[1] = 0x4321; g_tPrm[2] = 0;
         create(32);
         CHECK(g_tPrm[1] == 0x4321 && g_tPrm[2] == (uint32_t)(uintptr_t)g_vidmemArg, "Direct3D: the player's -managed stands");
@@ -936,7 +941,7 @@ static void CoreTests() {
         memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v3.1.1", 7);
         g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0;
         create(32);
-        CHECK(g_dxvkVer[0] == 3 && g_dxvkVer[2] == 1 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && strstr(g_d3dNote, "DXVK 3.1.1 (read from the planted image)"),
+        CHECK(g_dxvkVer[0] == 3 && g_dxvkVer[2] == 1 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && strstr(g_d3dNote, "DXVK 3.1.1") && !strstr(g_d3dNote, "read from") && strstr(g_d3dNote, ", card budget "),
               "Direct3D: DXVK 3.1.1: -managed set, the version in the line: %s", g_d3dNote);
         memset(tImg, 0xAB, sizeof(tImg));
         g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0;
@@ -950,7 +955,7 @@ static void CoreTests() {
         g_d3dCalls = 0; g_dxvk = -1; g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0;
         create(32);
         CHECK(g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && g_managedOn && strstr(g_d3dNote, "Wine (planted)")
-              && strstr(g_d3dNote, "Proton chose this version"),
+              && strstr(g_d3dNote, "Proton's choice"),
               "Direct3D: on Wine -managed is set as usual, and a 2.x is named as Proton's choice, not the download's: %s", g_d3dNote);
         g_tWine = 0; g_wineNote[0] = 0;
         memset(tImg, 0xAB, sizeof(tImg)); tImg[19] = 0; memcpy(tImg + 20, "v3.1.1", 7);
@@ -1017,6 +1022,201 @@ static void CoreTests() {
               "present: the world's set (469 MB, over twice 63) ends the skip on that very present, 40 ms after the last shown");
         g_cs.rt0 = keepRt0; g_skipRtEnd = 0; g_skipEndedRt = 0;
         g_presentSkip = 0; g_skippedPresents = 0; g_tPresentMs = -1; g_showMs = PRESENT_SHOW_MS;
+        // (8) A load without a loading screen: the render thread presents the same screen over and over while the game
+        // draws a few frames a second (T18: 121 presents a second against 2 to 7 game frames). Presents 8 ms apart.
+        static uint32_t tFrame = 1000; uintptr_t keepFrame = g_cs.frame; g_cs.frame = (uintptr_t)&tFrame;
+        g_rpWinMs = 0; g_rpOn = false; g_rpLastMadeMs = 0; g_rpSkipped = 0; g_rpDone = 0; g_rpLogged = 0;
+        auto present = [&](int64_t at) { g_tPresentMs = at; LONG b = g_tSwapPresents; ((SwapPresent_t)roSwap[3])(&g_tSwap, NULL, NULL, NULL, NULL, 0); return g_tSwapPresents > b; };
+        int64_t pms = 100000; int made = 0, calls = 0;
+        g_rpArmed = false;                                                    // before any world has loaded: splash screens, left alone
+        for (int i = 0; i < 375; i++) { if (i % 30 == 0) tFrame++; made += present(pms); calls++; pms += 8; }
+        CHECK(made == calls && !g_rpOn, "present: before the first world has loaded the repeat rule is not armed (%d of %d made)", made, calls);
+        g_rpArmed = true; made = calls = 0;
+        for (int i = 0; i < 1250; i++) { tFrame++; made += present(pms); calls++; pms += 8; }
+        CHECK(made == calls && !g_rpOn, "present: play at 120 frames a second, one present per frame: all %d made (%d)", calls, made);
+        made = calls = 0;
+        for (int i = 0; i < 300; i++) { tFrame++; for (int k = 0; k < 4; k++) { made += present(pms); calls++; pms += 8; } }
+        CHECK(made == calls && !g_rpOn, "present: four presents per game frame at 30 frames a second (frame generation): all %d made (%d)", calls, made);
+        made = calls = 0;
+        for (int i = 0; i < 300; i++) { tFrame++; for (int k = 0; k < 10; k++) { made += present(pms); calls++; pms += 3; } }
+        CHECK(made == calls && !g_rpOn, "present: ten presents per game frame at 33 frames a second is not a load either: all made (%d of %d)", made, calls);
+        made = calls = 0;
+        for (int i = 0; i < 60; i++) { tFrame++; for (int k = 0; k < 4; k++) { made += present(pms); calls++; pms += 21; } }
+        CHECK(made == calls && !g_rpOn, "present: frame generation on a slow machine, four presents per frame at 12 frames a second: all made (%d of %d)", made, calls);
+        made = calls = 0;
+        for (int i = 0; i < 60; i++) { tFrame++; made += present(pms); calls++; pms += 83; }
+        CHECK(made == calls && !g_rpOn, "present: a slow machine at 12 frames a second, one present per frame: all made (%d of %d)", made, calls);
+        pms += 400; made = calls = 0;                                         // a 400 ms hitch with no presents, then play again
+        for (int i = 0; i < 125; i++) { tFrame++; made += present(pms); calls++; pms += 8; }
+        CHECK(made == calls && !g_rpOn, "present: after a 400 ms hitch, play goes on unthrottled (%d of %d)", made, calls);
+        // The taxi: 120 presents a second, 4 game frames a second, for 3 s. Throttled within two windows, and from then on
+        // one present per PRESENT_SHOW_LOADING_MS at most.
+        made = calls = 0; int64_t engagedAt = -1, lastMade = -1, minGap = 1000000; int madeAfter = 0;
+        for (int i = 0; i < 375; i++) {
+            if (i % 30 == 0) tFrame++;
+            bool m = present(pms); made += m; calls++;
+            if (g_rpOn && engagedAt < 0) engagedAt = pms;
+            if (m && engagedAt >= 0 && pms > engagedAt) { madeAfter++; if (lastMade >= engagedAt && pms - lastMade < minGap) minGap = pms - lastMade; }
+            if (m) lastMade = pms;
+            pms += 8;
+        }
+        CHECK(g_rpOn && engagedAt >= 0 && engagedAt - (pms - 375 * 8) <= 2 * REPEAT_WINDOW_MS + 8 && minGap >= PRESENT_SHOW_LOADING_MS && madeAfter >= 60 && madeAfter <= 95,
+              "present: the taxi's loop is throttled %lld ms in, then %d presents made in the rest of 3 s, never closer than %lld ms (%d of %d made)",
+              engagedAt - (pms - 375 * 8), madeAfter, minGap, made, calls);
+        CHECK(g_rpDone == 0, "present: no line while it lasts");
+        // Back to one present per frame: released within two windows, and every present after that made.
+        int madeLate = 0, callsLate = 0;
+        for (int i = 0; i < 250; i++) { tFrame++; bool m = present(pms); pms += 8; if (i >= 64) { madeLate += m; callsLate++; } }
+        CHECK(!g_rpOn && madeLate == callsLate && g_rpDone == 1 && g_rpDoneSkipped > 200 && g_rpDoneFrames >= 10 && g_rpDoneMs >= 2500,
+              "present: the loop over, released and every present made again (%d of %d); the episode: %ld ms, %ld frames, %ld not made",
+              madeLate, callsLate, (long)g_rpDoneMs, (long)g_rpDoneFrames, (long)g_rpDoneSkipped);
+        // Frame generation after a load: four presents per game frame at 30 frames a second also ends it.
+        for (int i = 0; i < 375; i++) { if (i % 30 == 0) tFrame++; present(pms); pms += 8; }
+        CHECK(g_rpOn, "present: a second loop, throttled again");
+        madeLate = callsLate = 0;
+        for (int i = 0; i < 150; i++) { tFrame++; for (int k = 0; k < 4; k++) { bool m = present(pms); pms += 8; if (i >= 16) { madeLate += m; callsLate++; } } }
+        CHECK(!g_rpOn && madeLate == callsLate && g_rpDone == 2, "present: and frame generation after it releases it too (%d of %d made)", madeLate, callsLate);
+        RepeatLine();
+        CHECK(g_rpLogged == 2, "present: one line for the episodes over");
+        RepeatLine();
+        CHECK(g_rpLogged == 2, "present: and only one");
+        // The loading screen's own skip comes first: with it up the loop is not counted, and play after it is untouched.
+        // A throttle already running when it comes up (the splash before the first loading screen, T19) ends there,
+        // with no line: the loading screen logs itself.
+        for (int i = 0; i < 125; i++) { present(pms); pms += 8; }            // a splash: presents, the count still
+        CHECK(g_rpOn, "present: the splash before the first loading screen starts the throttle");
+        LONG doneBefore = g_rpDone;
+        g_presentSkip = 1; g_showMs = PRESENT_SHOW_LOADING_MS; g_lastShownMs = 0;
+        for (int i = 0; i < 375; i++) { if (i % 30 == 0) tFrame++; present(pms); pms += 8; }
+        CHECK(!g_rpOn && g_rpWinMs == 0 && g_rpDone == doneBefore, "present: on a loading screen the repeat rule stands aside, and the splash's throttle ends unlogged");
+        g_presentSkip = 0; made = calls = 0;
+        for (int i = 0; i < 125; i++) { tFrame++; made += present(pms); calls++; pms += 8; }
+        CHECK(made == calls && !g_rpOn, "present: and play after it is untouched from its first present (%d of %d)", made, calls);
+        tFrame -= 5000; made = calls = 0;                                    // the game sets its count back (a menu does, T16)
+        for (int i = 0; i < 125; i++) { tFrame++; made += present(pms); calls++; pms += 8; }
+        CHECK(made == calls && !g_rpOn, "present: a frame count set back is not a load (%d of %d)", made, calls);
+        g_cs.frame = 0; made = calls = 0;
+        for (int i = 0; i < 375; i++) { made += present(pms); calls++; pms += 8; }
+        CHECK(made == calls && !g_rpOn, "present: with no frame count the loop is left alone (%d of %d)", made, calls);
+        // A menu on screen gets every frame: the main menu under the loading screen's rule (M1: 505 asked, 30 made a
+        // second), and a menu over the throttle; when it closes the rules come back.
+        static uint8_t tMenu; uintptr_t keepMenu = g_cs.menu; g_cs.menu = (uintptr_t)&tMenu;
+        g_cs.frame = (uintptr_t)&tFrame; tMenu = 1;
+        g_presentSkip = 1; g_showMs = PRESENT_SHOW_LOADING_MS; g_lastShownMs = 0; made = calls = 0;
+        for (int i = 0; i < 500; i++) { tFrame++; made += present(pms); calls++; pms += 2; }
+        CHECK(made == calls, "present: the main menu under the loading screen's rule: every frame made (%d of %d)", made, calls);
+        tMenu = 0; made = calls = 0;
+        for (int i = 0; i < 500; i++) { made += present(pms); calls++; pms += 2; }
+        CHECK(made <= 35 && made >= 25, "present: the menu closed, the load after it is skipped again (%d of %d made in 1 s)", made, calls);
+        g_presentSkip = 0; g_rpWinMs = 0; g_rpOn = false;
+        for (int i = 0; i < 375; i++) { if (i % 30 == 0) tFrame++; present(pms); pms += 8; }
+        CHECK(g_rpOn, "present: a load without a loading screen throttled");
+        tMenu = 1; made = calls = 0;
+        for (int i = 0; i < 125; i++) { made += present(pms); calls++; pms += 8; }
+        CHECK(made == calls && !g_rpOn, "present: a menu opened over it gets every frame and ends the throttle (%d of %d)", made, calls);
+        tMenu = 0; g_cs.menu = 0; made = calls = 0;
+        g_presentSkip = 1; g_lastShownMs = 0;
+        for (int i = 0; i < 500; i++) { made += present(pms); calls++; pms += 2; }
+        CHECK(made <= 35, "present: with no menu byte the loading screen's rule stands (%d made in 1 s)", made);
+        g_presentSkip = 0; g_cs.menu = keepMenu;
+        static uint8_t mc[8]; static uint8_t mcTarget;
+        uint32_t mtgt = (uint32_t)(uintptr_t)&mcTarget;
+        mc[0] = 0x80; mc[1] = 0x3D; memcpy(mc + 2, &mtgt, 4); mc[6] = 0;
+        CHECK(MenuByteAt((uintptr_t)mc, (uintptr_t)&mcTarget) == (uintptr_t)&mcTarget, "menu byte: cmp byte [menu], 0");
+        CHECK(MenuByteAt((uintptr_t)mc, (uintptr_t)&mcTarget + 1) == 0, "menu byte: a check on another address is refused");
+        mc[6] = 1;
+        CHECK(MenuByteAt((uintptr_t)mc, (uintptr_t)&mcTarget) == 0, "menu byte: a compare against 1 is refused");
+        mc[6] = 0; mc[0] = 0x38;
+        CHECK(MenuByteAt((uintptr_t)mc, (uintptr_t)&mcTarget) == 0 && MenuByteAt(0x10, (uintptr_t)&mcTarget) == 0, "menu byte: another instruction, or unreadable code, is refused");
+        // Disarmed by the worker (the count stopped): a throttle it was in ends at once, unlogged, and every present is made.
+        g_presentSkip = 0; g_rpWinMs = 0; g_rpOn = false; g_rpArmed = true;
+        for (int i = 0; i < 375; i++) { if (i % 30 == 0) tFrame++; present(pms); pms += 8; }
+        CHECK(g_rpOn, "present: throttled before the worker disarms it");
+        LONG doneD = g_rpDone; g_rpArmed = false; made = calls = 0;
+        for (int i = 0; i < 125; i++) { if (i % 30 == 0) tFrame++; made += present(pms); calls++; pms += 8; }
+        CHECK(made == calls && !g_rpOn && g_rpWinMs == 0 && g_rpDone == doneD, "present: disarmed, every present made at once and the episode ends unlogged (%d of %d)", made, calls);
+        g_rpArmed = true;
+        // The frame count is taken only where the update that counts it reads as expected, or behind FusionFix's hook on
+        // that update (since 2026-08-06) with an untouched load of the count proving the variable.
+        static uint8_t fc[8], rd[8]; static uint32_t fcTarget; bool hk = true;
+        uint32_t tgt = (uint32_t)(uintptr_t)&fcTarget;
+        rd[0] = 0x8B; rd[1] = 0x15; memcpy(rd + 2, &tgt, 4);                 // mov edx, [count]: 1.0.8.0's reader
+        fc[0] = 0x83; fc[1] = 0x05; memcpy(fc + 2, &tgt, 4); fc[6] = 1;
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget, 7, (uintptr_t)rd, &hk) == (uintptr_t)&fcTarget && !hk, "frame count: add dword [count], 1 (1.0.8.0)");
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget, 6, (uintptr_t)rd, &hk) == 0, "frame count: 1.0.8.0's form is not taken at the CE's length");
+        fc[0] = 0xFF; fc[1] = 0x05; fc[6] = 0xCC;
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget, 6, (uintptr_t)rd, &hk) == (uintptr_t)&fcTarget && !hk, "frame count: inc dword [count] (the CE)");
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget + 4, 6, (uintptr_t)rd, &hk) == 0, "frame count: an instruction on another address is refused");
+        fc[0] = 0x83; fc[6] = 2;
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget, 7, (uintptr_t)rd, &hk) == 0, "frame count: adding 2 is not the count");
+        fc[0] = 0x8B;
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget, 7, (uintptr_t)rd, &hk) == 0 && FrameCountAt(0x10, (uintptr_t)&fcTarget, 7, (uintptr_t)rd, &hk) == 0,
+              "frame count: a load, or unreadable code, is refused");
+        fc[0] = 0xE9; fc[1] = 0x11; fc[2] = 0x22; fc[3] = 0x33; fc[4] = 0x44; fc[5] = 0x90; fc[6] = 0x90;
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget, 7, (uintptr_t)rd, &hk) == (uintptr_t)&fcTarget && hk,
+              "frame count: FusionFix's hook on 1.0.8.0's update (E9, then 90 90), proven by mov edx, [count]");
+        rd[0] = 0xA1; memcpy(rd + 1, &tgt, 4);                                // mov eax, [count]: the CE's reader
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget, 6, (uintptr_t)rd, &hk) == (uintptr_t)&fcTarget && hk,
+              "frame count: and on the CE's (E9, then 90), proven by mov eax, [count]");
+        memset(fc, 0x90, 7);
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget, 7, (uintptr_t)rd, &hk) == (uintptr_t)&fcTarget && hk, "frame count: all NOPs, between FusionFix's two writes");
+        fc[0] = 0xE9; fc[5] = 0xCC;
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget, 7, (uintptr_t)rd, &hk) == 0, "frame count: a jump followed by anything but NOPs is refused");
+        fc[5] = 0x90;
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget + 4, 7, (uintptr_t)rd, &hk) == 0, "frame count: a hook whose reader loads another address is refused");
+        rd[0] = 0x8B; rd[1] = 0x45; memcpy(rd + 2, &tgt, 4);                  // mov eax, [ebp + disp8]: not a load of an address
+        CHECK(FrameCountAt((uintptr_t)fc, (uintptr_t)&fcTarget, 7, (uintptr_t)rd, &hk) == 0, "frame count: a reader that is not a load of the count is refused");
+        // The worker arms the throttle once a world has loaded and the count is seen moving in play on two ticks in a row,
+        // and disarms it when the count stands still in play while presents go out (a hook that stopped it).
+        {
+            static uint32_t lf = 500; static uint8_t lm = 0;
+            uintptr_t keepF = g_cs.frame, keepM = g_cs.menu; bool keepW = g_worldLogged;
+            g_cs.frame = (uintptr_t)&lf; g_cs.menu = (uintptr_t)&lm;
+            auto fresh = [&]() { g_rpArmed = false; g_flSampled = false; g_flDisarmed = false; g_flArmedOnce = false; g_flStuck = 0; g_flMoved = 0; g_flLines = 0; };
+            fresh(); g_worldLogged = false;
+            FrameLiveTick(1000, false, true); lf += 60; FrameLiveTick(2000, false, true); lf += 60; FrameLiveTick(3000, false, true);
+            CHECK(!g_rpArmed, "frame count: the count moves but no world has loaded: not armed");
+            g_worldLogged = true; lf += 60; FrameLiveTick(4000, true, false);
+            CHECK(!g_rpArmed, "frame count: a loading screen up: not armed");
+            lf += 60; FrameLiveTick(5000, false, false);
+            CHECK(!g_rpArmed && g_flMoved == 0, "frame count: nobody in the world yet: not counted");
+            lf += 60; FrameLiveTick(6000, false, true);
+            CHECK(!g_rpArmed && g_flMoved == 1, "frame count: one tick moving in play is not enough yet");
+            lf += 60; FrameLiveTick(7000, false, true);
+            CHECK(g_rpArmed && g_flArmedOnce, "frame count: the second tick in a row: armed, and said once");
+            // Still, with the game's own presents going out through the hook (120 a tick): the hook's count drives it.
+            for (int i = 0; i < FRAME_STUCK_TICKS - 1; i++) { for (int k = 0; k < 120; k++) { present(pms); pms += 8; } FrameLiveTick(8000 + 1000 * i, false, true); }
+            CHECK(g_rpArmed, "frame count: still for %d s with presents going out: still armed", FRAME_STUCK_TICKS - 1);
+            for (int k = 0; k < 120; k++) { present(pms); pms += 8; } FrameLiveTick(12000, false, true);
+            CHECK(!g_rpArmed && g_flDisarmed, "frame count: still for %d s, counted from the hook's own presents: disarmed", FRAME_STUCK_TICKS);
+            lf += 3; g_presentCalls += 120; FrameLiveTick(13000, false, true);
+            CHECK(!g_rpArmed, "frame count: moving again for one tick: not yet");
+            lf += 3; g_presentCalls += 120; FrameLiveTick(14000, false, true);
+            CHECK(g_rpArmed, "frame count: moving again for two (three frames a second are enough): armed again");
+            for (int i = 0; i < 20; i++) { lf += 2; g_presentCalls += 120; FrameLiveTick(15000 + 1000 * i, false, true); }
+            CHECK(g_rpArmed, "frame count: a taxi skip, 2 frames and 120 presents a second for 20 s: still armed");
+            for (int i = 0; i < 10; i++) { g_presentCalls += 5; FrameLiveTick(40000 + 1000 * i, false, true); }
+            CHECK(g_rpArmed, "frame count: still with few presents (the game not drawing): still armed");
+            lm = 1;
+            for (int i = 0; i < 10; i++) { g_presentCalls += 120; FrameLiveTick(60000 + 1000 * i, false, true); }
+            CHECK(g_rpArmed, "frame count: still under a menu: still armed");
+            lm = 0;
+            for (int i = 0; i < 10; i++) { g_presentCalls += 120; FrameLiveTick(70000 + 1000 * i, true, true); }
+            CHECK(g_rpArmed, "frame count: still under a loading screen: still armed");
+            for (int i = 0; i < 10; i++) { g_presentCalls += 120; FrameLiveTick(80000 + 1000 * i, false, false); }
+            CHECK(g_rpArmed && g_flStuck == 0, "frame count: still with nobody in the world: neither counted nor disarmed");
+            // A write outside the update (a save load's restore: 840 -> 1213851 in T12) is neither moving nor still.
+            fresh(); FrameLiveTick(90000, false, true);
+            lf += 1213000; g_presentCalls += 120; FrameLiveTick(91000, false, true);
+            lf += 60; g_presentCalls += 120; FrameLiveTick(92000, false, true);
+            CHECK(!g_rpArmed && g_flMoved == 1, "frame count: a save load's jump is not a move: one real tick after it is not enough");
+            // A count that never moves in play never arms it, and it says so once.
+            fresh();
+            for (int i = 0; i < 12; i++) { g_presentCalls += 120; FrameLiveTick(100000 + 1000 * i, false, true); }
+            CHECK(!g_rpArmed && g_flDisarmed && g_flLines == 1 && !g_flArmedOnce, "frame count: a count that never moves never arms it, and says so once (%d lines)", g_flLines);
+            g_cs.frame = keepF; g_cs.menu = keepM; g_worldLogged = keepW; fresh();
+        }
+        g_cs.frame = keepFrame; g_tPresentMs = -1; g_rpWinMs = 0; g_rpOn = false; g_rpArmed = false; g_presentSkip = 0; g_showMs = PRESENT_SHOW_MS;
         // A second Direct3DCreate9 hooks nothing again, and a second CreateDevice leaves the one hook as it is.
         ((CreateDevice_t)roD3D[16])(&g_tD3D, 0, 1, NULL, 0, NULL, &dev);
         CHECK(g_tDevCreates == 2 && roSwap[3] == (void*)HkSwapPresent && g_oSwapPresent == (SwapPresent_t)FakeSwapPresent && g_tSwapRefs == 0,
@@ -1033,27 +1233,530 @@ static void CoreTests() {
     {
         BrakeCfg bc = { 512, 32, 128, 192, 20, 800 }; int ba = -1;
         BrakeState bs = { 4000, false, -1, 0 };
-        CHECK(BrakeDecide(bs, 0, 3300, 799, 1000, bc, &ba) == 4000 && ba == BRAKE_NONE && !bs.held, "brake: plenty of room, nothing");
+        // (560, not 1000: since 1.0.5 a fall of 96 MB or more in the second before the next tick is a fast fall, 8az)
+        CHECK(BrakeDecide(bs, 0, 3300, 799, 560, bc, &ba) == 4000 && ba == BRAKE_NONE && !bs.held, "brake: plenty of room, nothing");
         CHECK(BrakeDecide(bs, 1000, 3300, 799, 500, bc, &ba) == 2870 && ba == BRAKE_HOLD && bs.held,
               "brake: under 512 MB it holds once, at the budget whose wall is the V held now (%d, want 2870)", bs.t);
         CHECK(BrakeDecide(bs, 2000, 3290, 799, 499, bc, &ba) == 2870 && ba == BRAKE_NONE, "brake: held once, not again as V dips");
         CHECK(BrakeDecide(bs, 6000, 3300, 799, 460, bc, &ba) == 2870 && ba == BRAKE_NONE, "brake: a fall inside the wait does nothing");
         CHECK(BrakeDecide(bs, 21000, 3300, 799, 460, bc, &ba) == 2742 && ba == BRAKE_STEP, "brake: a 40 MB fall after the wait is one step (%d, want 2742)", bs.t);
         CHECK(BrakeDecide(bs, 42000, 3200, 799, 450, bc, &ba) == 2742 && ba == BRAKE_NONE, "brake: a 10 MB fall is not enough");
-        CHECK(BrakeDecide(bs, 63000, 3200, 799, 470, bc, &ba) == 2742 && ba == BRAKE_NONE && bs.refL == 470, "brake: a rise moves the reference up");
-        CHECK(BrakeDecide(bs, 84000, 3200, 799, 437, bc, &ba) == 2614 && ba == BRAKE_STEP, "brake: 33 MB under the highest point since is a step (%d)", bs.t);
-        CHECK(BrakeDecide(bs, 90000, 3000, 799, 180, bc, &ba) == 2614 && ba == BRAKE_NONE, "brake: an emergency, but only 6 s after the last action");
+        // The fall is measured from L at the last action: L rising and falling back to where it was is no fall (the
+        // field report lost two steps to that, at L 404 after rises to 420 and 436).
+        CHECK(BrakeDecide(bs, 63000, 3200, 799, 470, bc, &ba) == 2742 && ba == BRAKE_NONE && bs.refL == 460, "brake: a rise does not move the reference");
+        CHECK(BrakeDecide(bs, 84000, 3200, 799, 437, bc, &ba) == 2742 && ba == BRAKE_NONE,
+              "brake: 33 MB under the highest point since, but 23 under L at the last action, is no step (%d)", bs.t);
+        CHECK(BrakeDecide(bs, 85000, 3200, 799, 428, bc, &ba) == 2614 && ba == BRAKE_STEP && bs.refL == 428,
+              "brake: 32 MB under L at the last action is a step (%d)", bs.t);
+        CHECK(BrakeDecide(bs, 91000, 3000, 799, 180, bc, &ba) == 2614 && ba == BRAKE_NONE, "brake: an emergency, but only 6 s after the last action");
         CHECK(BrakeDecide(bs, 95000, 3000, 799, 180, bc, &ba) == 2486 && ba == BRAKE_EMERGENCY, "brake: an emergency after 10 s needs no fall (%d)", bs.t);
         CHECK(BrakeDecide(bs, 105000, 3000, 799, 180, bc, &ba) == 2358 && ba == BRAKE_EMERGENCY, "brake: and again 10 s later, still no fall");
         bs.t = 850; bs.lastActMs = 0;
         CHECK(BrakeDecide(bs, 200000, 3000, 799, 100, bc, &ba) == 800 && ba == BRAKE_EMERGENCY, "brake: never under the floor");
         CHECK(BrakeDecide(bs, 300000, 3000, 799, 50, bc, &ba) == 800 && ba == BRAKE_NONE, "brake: at the floor, nothing more");
+        // A fast fall (BRAKE_FAST_MB from one tick to the next, a second apart; a player's crash, FINDINGS 8az): it acts on
+        // that tick, without the wait, two steps at once; a hold reached on one goes two steps under what is in use.
+        {
+            BrakeCfg fc = { 512, 32, 128, 192, 20, 800 }; int fa = -1;
+            int hold = (int)(((3878 + 2) * 10 + 8) / 9 - 749);
+            BrakeState fs = { 4000, false, -1, 0 };
+            BrakeDecide(fs, 1000, 3878, 749, 520, fc, &fa);                  // his last tick over the line
+            int t = BrakeDecide(fs, 2000, 3878, 749, 398, fc, &fa);          // 122 MB in one second, under it
+            CHECK(fa == BRAKE_HOLD && t == hold - 256 && fs.fastMb == 122,
+                  "fast: a hold reached on a fall of 122 MB in one second goes two steps under what is in use (%d, the plain hold %d)", t, hold);
+            t = BrakeDecide(fs, 3000, 3800, 749, 290, fc, &fa);
+            CHECK(fa == BRAKE_FAST && t == hold - 512 && fs.fastMb == 108, "fast: 108 MB more a second later: two steps at once, no 20 s wait (%d)", t);
+            t = BrakeDecide(fs, 4000, 3750, 749, 250, fc, &fa);
+            CHECK(fa == BRAKE_NONE && t == hold - 512 && fs.fastMb == 0, "fast: 40 MB in a second is not fast, and the step's wait stands (%d)", t);
+            t = BrakeDecide(fs, 5000, 3700, 749, 150, fc, &fa);
+            CHECK(fa == BRAKE_FAST && t == hold - 768, "fast: under the emergency line a fast fall still acts at once, not after 10 s (%d)", t);
+            // The same falls two seconds apart (a missed tick, a pause): not fast, the plain rules.
+            BrakeState gs = { 4000, false, -1, 0 };
+            BrakeDecide(gs, 1000, 3878, 749, 520, fc, &fa);
+            t = BrakeDecide(gs, 3000, 3878, 749, 398, fc, &fa);
+            CHECK(fa == BRAKE_HOLD && t == hold && gs.fastMb == 0, "fast: the same fall across two seconds is a plain hold (%d)", t);
+            t = BrakeDecide(gs, 5000, 3800, 749, 290, fc, &fa);
+            CHECK(fa == BRAKE_NONE && t == hold, "fast: and the next fall two seconds on waits as before (%d)", t);
+            // Never under the floor.
+            BrakeState ls = { 900, true, 600, 0 }; ls.lastL = 600; ls.lastLMs = 9000; ls.downMs = 9000;
+            t = BrakeDecide(ls, 10000, 3000, 749, 450, fc, &fa);
+            CHECK(t == 800 && fa == BRAKE_FAST, "fast: two steps stop at the floor (%d)", t);
+            // In play, through the worker's tick, onto the release's log (sis_test reads the lines back).
+            TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+            g_tV = 3878ull << 20; SisTick(30000, 520); SisTick(31000, 398); int t1 = g_brakeSt.t; SisTick(32000, 290);
+            int want1 = (int)(((3878 + 2) * 10 + 8) / 9 - 799) - 256;
+            CHECK(g_brakeSt.held && t1 == want1 && g_brakeSt.t == want1 - 256 && TTabAll((uint64_t)(want1 - 256)),
+                  "fast: in play, the hold on a fast fall and two steps a second later, written to the table (%d, %d)", t1, g_brakeSt.t);
+            g_tV = 0; TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        }
         BrakeState bw = { 4000, false, -1, 0 };
         CHECK(BrakeDecide(bw, 0, 4317, 799, 500, bc, &ba) == 4000 && ba == BRAKE_NONE && bw.held, "brake: a hold at the wall latches, no write");
         BrakeState bl = { 2000, false, -1, 0 };
         CHECK(BrakeDecide(bl, 0, 3300, 799, 500, bc, &ba) == 2000 && ba == BRAKE_NONE && bl.held, "brake: a hold never raises a lower budget");
         BrakeState bn = { 4000, false, -1, 0 };
         CHECK(BrakeDecide(bn, 0, -1, 799, 100, bc, &ba) == 4000 && ba == BRAKE_NONE && !bn.held, "brake: no V read, nothing");
+    }
+    // ---- the way back up (docs/TWO-WAY-BUDGET.md): a level proven to hold is the ceiling, the budget comes back to it,
+    // and a step after a raise lowers it for good. 4K, X 799: the wall of 2870 is 3,300 MB of V, of 2742 3,184, of 2614 3,069.
+    {
+        BrakeCfg rc = { 512, 32, 128, 192, 20, 800, 1, 4000 }; int ra = -1;
+        BrakeState rs = { 4000, false, -1, 0 };
+        CHECK(BrakeDecide(rs, 0, 3300, 799, 500, rc, &ra) == 2870 && ra == BRAKE_HOLD, "up: the hold (%d)", rs.t);
+        BrakeDecide(rs, 200000, 3290, 799, 500, rc, &ra);
+        CHECK(ra == BRAKE_NONE && rs.ceiling == 0, "up: no ceiling before the level has stood 300 s");
+        BrakeDecide(rs, 299000, 3290, 799, 500, rc, &ra);
+        CHECK(ra == BRAKE_NONE && rs.ceiling == 0, "up: still none at 299 s");
+        BrakeDecide(rs, 300000, 3290, 799, 500, rc, &ra);
+        CHECK(ra == BRAKE_NONE && rs.ceiling == 2870 && (rs.ev & BRAKE_EV_CEIL_SET), "up: 300 s pressed with L flat proves the level: ceiling %d", rs.ceiling);
+        CHECK(BrakeDecide(rs, 320000, 3290, 799, 468, rc, &ra) == 2742 && ra == BRAKE_STEP && rs.ceiling == 2870 && !rs.ev,
+              "up: a step from a level never raised to leaves the ceiling (%d, ceiling %d)", rs.t, rs.ceiling);
+        CHECK(BrakeDecide(rs, 345000, 3200, 799, 436, rc, &ra) == 2614 && ra == BRAKE_STEP, "up: a second step (%d)", rs.t);
+        CHECK(BrakeDecide(rs, 600000, 3050, 799, 436, rc, &ra) == 2614 && ra == BRAKE_NONE, "up: no raise 255 s after a down action");
+        CHECK(BrakeDecide(rs, 645000, 3050, 799, 436, rc, &ra) == 2742 && ra == BRAKE_RAISE && rs.raised,
+              "up: 300 s after the last step, pressed and quiet: one step back up (%d)", rs.t);
+        CHECK(BrakeDecide(rs, 1000000, 3050, 799, 436, rc, &ra) == 2742 && ra == BRAKE_NONE && rs.awaitPress,
+              "up: no second raise before the world has pressed the first, however long it waits");
+        CHECK(BrakeDecide(rs, 1100000, 3130, 799, 436, rc, &ra) == 2742 && ra == BRAKE_NONE && !rs.awaitPress, "up: the world presses the raise");
+        CHECK(BrakeDecide(rs, 1399000, 3130, 799, 436, rc, &ra) == 2742 && ra == BRAKE_NONE, "up: and the next raise waits 300 s from then");
+        CHECK(BrakeDecide(rs, 1400000, 3130, 799, 436, rc, &ra) == 2870 && ra == BRAKE_RAISE, "up: the second raise, to the ceiling (%d)", rs.t);
+        int acts = 0, evs = 0;
+        for (int64_t ms = 1401000; ms <= 5000000; ms += 1000) { BrakeDecide(rs, ms, 3300, 799, 436, rc, &ra); acts += ra != BRAKE_NONE; evs += rs.ev != 0; }
+        CHECK(acts == 0 && evs == 0 && rs.t == 2870, "up: an hour at the ceiling, pressed and quiet: nothing (%d actions, %d events)", acts, evs);
+        CHECK(BrakeDecide(rs, 5100000, 3300, 799, 420, rc, &ra) == 2870 && ra == BRAKE_NONE, "up: 16 MB under L at the last action is no step");
+        CHECK(BrakeDecide(rs, 5190000, 3300, 799, 404, rc, &ra) == 2742 && ra == BRAKE_STEP && rs.ceiling == 2742 && (rs.ev & BRAKE_EV_CEIL_LEARNED) && !rs.raised,
+              "up: a slow fall (drift, 32 MB over 90 s) long after a raise lowers the ceiling to where it lands (%d, ceiling %d)", rs.t, rs.ceiling);
+        acts = 0;
+        for (int64_t ms = 5191000; ms <= 7000000; ms += 1000) { BrakeDecide(rs, ms, 3180, 799, 404, rc, &ra); acts += ra == BRAKE_RAISE; }
+        CHECK(acts == 0 && rs.t == 2742, "up: and nothing ever raises past the lowered ceiling (%d)", rs.t);
+
+        // A raise never blinds the brake: an emergency or a step right after it fires at once, and lowers the ceiling.
+        BrakeState es = {}; es.t = 2614; es.held = true; es.refL = 270; es.ceiling = 2870; es.proofL = 270; es.quietHiL = 260; es.xRef = 799;
+        CHECK(BrakeDecide(es, 400000, 3050, 799, 257, rc, &ra) == 2742 && ra == BRAKE_RAISE, "up: a raise at L 257, 1 MB over the raise line (%d)", es.t);
+        CHECK(BrakeDecide(es, 403000, 3050, 799, 180, rc, &ra) == 2614 && ra == BRAKE_EMERGENCY && es.ceiling == 2614,
+              "up: L 180 3 s later is an emergency at once, and the ceiling comes down with it (%d, ceiling %d)", es.t, es.ceiling);
+        BrakeState ss = {}; ss.t = 2614; ss.held = true; ss.refL = 300; ss.ceiling = 2870; ss.proofL = 300; ss.quietHiL = 295; ss.xRef = 799;
+        CHECK(BrakeDecide(ss, 400000, 3050, 799, 290, rc, &ra) == 2742 && ra == BRAKE_RAISE, "up: a raise (%d)", ss.t);
+        CHECK(BrakeDecide(ss, 403000, 3050, 799, 268, rc, &ra) == 2614 && ra == BRAKE_STEP && ss.ceiling == 2614,
+              "up: a net 32 MB fall 3 s later is a step at once (%d, ceiling %d)", ss.t, ss.ceiling);
+
+        // Every condition, one missing at a time, against a state where the raise fires.
+        BrakeState b0 = {}; b0.t = 2614; b0.held = true; b0.refL = 436; b0.ceiling = 2870; b0.proofL = 436; b0.quietHiL = 436; b0.xRef = 799;
+        BrakeState b = b0;
+        CHECK(BrakeDecide(b, 400000, 3050, 799, 436, rc, &ra) == 2742 && ra == BRAKE_RAISE, "up: the control case raises (%d)", b.t);
+        b = b0; b.quietMs = 200000;
+        CHECK(BrakeDecide(b, 400000, 3050, 799, 436, rc, &ra) == 2614 && ra == BRAKE_NONE, "up: none with a chunk lost 200 s ago");
+        b = b0; b.refL = b.proofL = b.quietHiL = 250;
+        CHECK(BrakeDecide(b, 400000, 3050, 799, 250, rc, &ra) == 2614 && ra == BRAKE_NONE, "up: none with L under the emergency line + 64");
+        b = b0;
+        CHECK(BrakeDecide(b, 400000, 3000, 799, 436, rc, &ra) == 2614 && ra == BRAKE_NONE, "up: none while the world does not press the budget");
+        b = b0; b.ceiling = 2614;
+        CHECK(BrakeDecide(b, 400000, 3050, 799, 436, rc, &ra) == 2614 && ra == BRAKE_NONE, "up: none at the ceiling");
+        b = b0; b.lastActMs = 200000;
+        CHECK(BrakeDecide(b, 400000, 3050, 799, 436, rc, &ra) == 2614 && ra == BRAKE_NONE, "up: none 200 s after a down action");
+        b = b0; BrakeCfg off = rc; off.raiseOn = 0;
+        CHECK(BrakeDecide(b, 400000, 3050, 799, 436, off, &ra) == 2614 && ra == BRAKE_NONE, "up: none with raises off (ExtraStreamingMemory, Wine with the lines lowered)");
+        b = b0; BrakeCfg capped = rc; capped.capMb = 2700;
+        CHECK(BrakeDecide(b, 400000, 3050, 799, 436, capped, &ra) == 2700 && ra == BRAKE_RAISE && b.ceiling == 2700 && (b.ev & BRAKE_EV_CEIL_CAP),
+              "up: the sizing's figure after a resize caps the ceiling and the raise, and says so (%d, ceiling %d)", b.t, b.ceiling);
+        // Smaller render targets clamp the ceiling to the budget in force once they have held BRAKE_X_TICKS; a device
+        // reset's one-tick dip (T18: 797, 518, 801 MB) does not. A down action 200 s ago keeps raises out of the way.
+        b = b0; b.xRef = 797; b.lastActMs = 200000;
+        BrakeDecide(b, 400000, 3050, 518, 436, rc, &ra);
+        BrakeDecide(b, 401000, 3050, 801, 436, rc, &ra);
+        CHECK(b.ceiling == 2870 && !b.ev && b.xRef == 797, "up: a device reset's one-tick dip in the render targets leaves the ceiling (%d)", b.ceiling);
+        BrakeDecide(b, 402000, 3050, 252, 436, rc, &ra);
+        BrakeDecide(b, 403000, 3050, 252, 436, rc, &ra);
+        CHECK(b.ceiling == 2870, "up: two ticks smaller are not yet a new resolution");
+        CHECK(BrakeDecide(b, 404000, 3050, 252, 436, rc, &ra) == 2614 && ra == BRAKE_NONE && b.ceiling == 2614 && (b.ev & BRAKE_EV_CEIL_X) && b.xRef == 252,
+              "up: the third is: the ceiling comes to the budget in force (ceiling %d)", b.ceiling);
+        // With every raise condition met, a smaller set being confirmed holds the raise off: the ceiling it sets is the
+        // level in force, not a raised one (the 1.0.4 review, brake-3).
+        b = b0;
+        BrakeDecide(b, 400000, 3050, 252, 436, rc, &ra);
+        CHECK(ra == BRAKE_NONE && b.t == 2614 && b.xLowTicks == 1, "up: no raise on the first tick of a smaller render-target set (%d)", b.t);
+        BrakeDecide(b, 401000, 3050, 252, 436, rc, &ra); BrakeDecide(b, 402000, 3050, 252, 436, rc, &ra);
+        CHECK(b.t == 2614 && b.ceiling == 2614, "up: nor on the second; the third sets the ceiling to the level in force (%d, ceiling %d)", b.t, b.ceiling);
+        // Before any ceiling is proven a smaller set proves nothing: the ceiling stays unset (the X rule's guard).
+        BrakeState xg = {}; xg.t = 2614; xg.held = true; xg.refL = 436; xg.proofL = 436; xg.quietHiL = 436; xg.xRef = 797;
+        for (int i = 0; i < 3; i++) BrakeDecide(xg, 400000 + 1000 * i, 2900, 252, 436, rc, &ra);
+        CHECK(xg.ceiling == 0 && xg.xRef == 252, "up: a smaller set with no ceiling proven leaves it unset (%d), and is the new reference", xg.ceiling);
+        // A larger set restarts the proof: no ceiling from a span that ran mostly at the old resolution.
+        BrakeState xu = {}; xu.t = 2614; xu.held = true; xu.refL = 436; xu.proofL = 436; xu.quietHiL = 436; xu.xRef = 252;
+        BrakeDecide(xu, 400000, 2900, 797, 436, rc, &ra);
+        BrakeDecide(xu, 600000, 3100, 797, 436, rc, &ra);
+        CHECK(xu.ceiling == 0 && xu.xRef == 797, "up: a larger set restarts the proof: none 200 s after it (%d)", xu.ceiling);
+        BrakeDecide(xu, 700000, 3100, 797, 436, rc, &ra);
+        CHECK(xu.ceiling == 2614, "up: and 300 s after it the level is proven (%d)", xu.ceiling);
+        // A down action restarts the proof: an emergency at a constant L, then L over the line: no proof for 300 s.
+        BrakeState xp = {}; xp.t = 2614; xp.held = true; xp.refL = 180; xp.proofL = 180; xp.quietHiL = 180; xp.xRef = 799;
+        CHECK(BrakeDecide(xp, 400000, 2950, 799, 180, rc, &ra) == 2486 && ra == BRAKE_EMERGENCY, "up: an emergency (%d)", xp.t);
+        BrakeDecide(xp, 410000, 2950, 799, 300, rc, &ra); BrakeDecide(xp, 600000, 2950, 799, 300, rc, &ra);
+        CHECK(xp.ceiling == 0, "up: no proof 200 s after the down action (%d)", xp.ceiling);
+        BrakeDecide(xp, 700000, 2950, 799, 300, rc, &ra);
+        CHECK(xp.ceiling == 2486, "up: proven 300 s after it (%d)", xp.ceiling);
+        // The quiet window restarts when L falls more than 8 MB under its highest, even with no step: the raise waits
+        // 300 s from that fall, not from the last down action.
+        BrakeState qw = {}; qw.t = 2742; qw.held = true; qw.refL = 468; qw.ceiling = 2870; qw.proofL = 468; qw.quietHiL = 468; qw.xRef = 799;
+        qw.quietMs = qw.lastActMs = qw.proofMs = 320000;
+        BrakeDecide(qw, 520000, 3200, 799, 452, rc, &ra);
+        CHECK(BrakeDecide(qw, 620000, 3200, 799, 452, rc, &ra) == 2742 && ra == BRAKE_NONE, "up: 16 MB lost 100 s ago, no step: no raise 300 s after the last one");
+        CHECK(BrakeDecide(qw, 820000, 3200, 799, 452, rc, &ra) == 2870 && ra == BRAKE_RAISE, "up: the raise comes 300 s after that loss (%d)", qw.t);
+        // An emergency is never a burst: a fast fall under the emergency line long after a climb lowers the ceiling.
+        BrakeState ee = {}; ee.t = 2870; ee.held = true; ee.refL = 270; ee.ceiling = 2870; ee.raised = true; ee.lastUpMs = 100000; ee.pressMs = 100000;
+        ee.proofL = 270; ee.quietHiL = 270; ee.xRef = 799;
+        BrakeDecide(ee, 500000, 3300, 799, 270, rc, &ra); BrakeDecide(ee, 501000, 3300, 799, 250, rc, &ra);
+        CHECK(BrakeDecide(ee, 503000, 3300, 799, 180, rc, &ra) == 2742 && ra == BRAKE_EMERGENCY && ee.ceiling == 2742 && (ee.ev & BRAKE_EV_CEIL_LEARNED),
+              "burst: an emergency 400 s after a climb is never a burst: the ceiling comes down with it (%d)", ee.ceiling);
+        // Bursts and drift (owner, 2026-09-26). After a climb back to the proven level, a burst (32 MB lost in 2 s, 15
+        // minutes after the raise) steps the budget down but teaches the ceiling nothing, and the budget comes back.
+        BrakeState bb = {}; bb.t = 2870; bb.held = true; bb.refL = 436; bb.ceiling = 2870; bb.raised = true; bb.lastUpMs = 100000;
+        bb.proofL = 436; bb.quietHiL = 436; bb.xRef = 799;
+        BrakeDecide(bb, 500000, 3300, 799, 420, rc, &ra);                   // a 16 MB dip that recovers: the fall's clock starts again
+        BrakeDecide(bb, 600000, 3300, 799, 436, rc, &ra);
+        CHECK(BrakeDecide(bb, 1000000, 3300, 799, 436, rc, &ra) == 2870 && ra == BRAKE_NONE && bb.fallMs == 0, "burst: at the proven level after a climb back");
+        BrakeDecide(bb, 1001000, 3300, 799, 420, rc, &ra);
+        CHECK(BrakeDecide(bb, 1003000, 3300, 799, 400, rc, &ra) == 2742 && ra == BRAKE_STEP && bb.ceiling == 2870 && !(bb.ev & BRAKE_EV_CEIL_LEARNED),
+              "burst: a taxi skip's fall steps the budget down and leaves the ceiling (%d, ceiling %d)", bb.t, bb.ceiling);
+        int ups = 0; int64_t upAt = -1;
+        for (int64_t ms = 1004000; ms <= 1400000; ms += 1000) { BrakeDecide(bb, ms, 3130, 799, 400, rc, &ra); if (ra == BRAKE_RAISE) { ups++; if (upAt < 0) upAt = ms; } }
+        CHECK(ups == 1 && upAt == 1303000 && bb.t == 2870 && bb.ceiling == 2870,
+              "burst: and it comes back to the proven level 300 s later (%d raise at %lld s, budget %d)", ups, upAt / 1000, bb.t);
+        // The same burst within BRAKE_UP_SPAN_MS of a raise is the world growing into it: that teaches the ceiling.
+        BrakeState bg = {}; bg.t = 2870; bg.held = true; bg.refL = 436; bg.ceiling = 2870; bg.raised = true; bg.lastUpMs = 900000;
+        bg.proofL = 436; bg.quietHiL = 436; bg.xRef = 799;
+        BrakeDecide(bg, 1001000, 3300, 799, 420, rc, &ra);
+        CHECK(BrakeDecide(bg, 1003000, 3300, 799, 400, rc, &ra) == 2742 && bg.ceiling == 2742 && (bg.ev & BRAKE_EV_CEIL_LEARNED),
+              "burst: a fast fall that began 101 s after a raise lowers the ceiling (%d)", bg.ceiling);
+        // A raise the world leaves unpressed for 5 minutes (a pause, a long stand) and then grows into fast: that fall is
+        // the world growing into the raise, and it teaches the ceiling (the 1.0.4 review, brake-1). Pressed soon after
+        // the raise, a fast fall 5 minutes after the press is a burst again.
+        BrakeState bu0 = {}; bu0.t = 2742; bu0.held = true; bu0.refL = 436; bu0.ceiling = 2870; bu0.proofL = 436; bu0.quietHiL = 436; bu0.xRef = 799; bu0.lastActMs = 100000;
+        BrakeState bu = bu0;
+        CHECK(BrakeDecide(bu, 400000, 3150, 799, 436, rc, &ra) == 2870 && ra == BRAKE_RAISE && bu.awaitPress, "burst: a raise to the ceiling (%d)", bu.t);
+        BrakeDecide(bu, 701000, 3150, 799, 436, rc, &ra);
+        CHECK(bu.awaitPress, "burst: still unpressed 301 s later");
+        BrakeDecide(bu, 702000, 3300, 799, 420, rc, &ra);                   // play resumes: the world grows into the raise
+        CHECK(BrakeDecide(bu, 704000, 3300, 799, 400, rc, &ra) == 2742 && ra == BRAKE_STEP && bu.ceiling == 2742 && (bu.ev & BRAKE_EV_CEIL_LEARNED),
+              "burst: a fast fall into a raise left unpressed for 5 minutes lowers the ceiling (%d)", bu.ceiling);
+        bu = bu0;
+        BrakeDecide(bu, 400000, 3150, 799, 436, rc, &ra);
+        BrakeDecide(bu, 430000, 3300, 799, 436, rc, &ra);
+        CHECK(!bu.awaitPress && bu.pressMs == 430000, "burst: the world presses the raise 30 s after it");
+        BrakeDecide(bu, 731000, 3300, 799, 420, rc, &ra);
+        CHECK(BrakeDecide(bu, 733000, 3300, 799, 400, rc, &ra) == 2742 && ra == BRAKE_STEP && bu.ceiling == 2870 && !(bu.ev & BRAKE_EV_CEIL_LEARNED),
+              "burst: a fast fall 301 s after the press is a burst: the ceiling stays (%d)", bu.ceiling);
+        // Pauses do not count: BrakeResume moves every window on by the pause, and a window never set stays unset.
+        BrakeState pz = {}; pz.lastActMs = 1000; pz.proofMs = 2000; pz.quietMs = 3000; pz.lastUpMs = 0; pz.pressMs = 4000; pz.fallMs = 5000; pz.downMs = 1000;
+        g_brakePauseMs = 10000; BrakeResume(pz, 50000);
+        CHECK(pz.lastActMs == 41000 && pz.proofMs == 42000 && pz.quietMs == 43000 && pz.lastUpMs == 0 && pz.pressMs == 44000 && pz.fallMs == 45000
+              && pz.downMs == 1000 && g_brakePauseMs == 0,
+              "up: a 40 s pause moves the windows on by 40 s, leaves the unset ones at 0, and never the step and emergency wait");
+        // A raise the world has not pressed yet: a fast fall into it is not a burst, however long after the raise (D3b).
+        BrakeState ap = {}; ap.t = 2870; ap.held = true; ap.refL = 436; ap.ceiling = 2870; ap.raised = true; ap.awaitPress = true; ap.lastUpMs = 100000;
+        ap.proofL = 436; ap.quietHiL = 436; ap.xRef = 799;
+        BrakeDecide(ap, 501000, 2900, 799, 420, rc, &ra);
+        CHECK(BrakeDecide(ap, 503000, 2900, 799, 400, rc, &ra) == 2742 && ra == BRAKE_STEP && ap.ceiling == 2742 && (ap.ev & BRAKE_EV_CEIL_LEARNED),
+              "burst: a fast fall into a raise not yet pressed lowers the ceiling (%d)", ap.ceiling);
+
+        // The proof: a span restarts when L drops more than 8 MB under its start, and it is taken only on a pressed tick.
+        BrakeState ps = { 4000, false, -1, 0 };
+        BrakeDecide(ps, 0, 3300, 799, 500, rc, &ra);
+        BrakeDecide(ps, 200000, 3290, 799, 484, rc, &ra);
+        BrakeDecide(ps, 300000, 3290, 799, 484, rc, &ra);
+        CHECK(ra == BRAKE_NONE && ps.ceiling == 0 && ps.t == 2870, "up: a 16 MB drop inside the span starts it again, no proof at 300 s");
+        BrakeDecide(ps, 500000, 3000, 799, 484, rc, &ra);
+        CHECK(ps.ceiling == 0, "up: no proof on a tick the world does not press");
+        BrakeDecide(ps, 510000, 3290, 799, 484, rc, &ra);
+        CHECK(ps.ceiling == 2870, "up: proven on the first pressed tick after the span (%d)", ps.ceiling);
+        // The hold level did not hold in BRAKEN2 (L 507 at V 3253, then 475 at the same V): only the step's level can prove.
+        BrakeState hs = { 4000, false, -1, 0 };
+        BrakeDecide(hs, 133000, 3253, 801, 507, rc, &ra);
+        int hold = hs.t;
+        BrakeDecide(hs, 179000, 3250, 801, 475, rc, &ra);
+        CHECK(ra == BRAKE_STEP && hs.t == hold - 128 && hs.ceiling == 0, "up: the hold level loses L at the same V: a step, no ceiling (%d)", hs.t);
+        BrakeDecide(hs, 479000, 3250, 801, 475, rc, &ra);
+        CHECK(hs.ceiling == hold - 128, "up: the step's level proves itself, not the hold's (%d)", hs.ceiling);
+
+        // The field report replayed with the corrected fall (the one-way brake it ran, X 568): hold at 1,615, steps at L 452
+        // and 420, then L rising 16 and 32 MB and falling back to 404 twice. It ends at 1,359 where the field ended at 1,103.
+        BrakeCfg fc = { 512, 32, 128, 192, 20, 800, 0, 0 }; BrakeState fs = { 4000, false, -1, 0 };
+        static const int kField[][3] = { { 142000, 1962, 484 }, { 168000, 1963, 452 }, { 600000, 1900, 468 }, { 1310000, 1900, 420 },
+                                         { 1400000, 1900, 436 }, { 1481000, 1900, 404 }, { 1560000, 1900, 452 }, { 1596000, 1900, 404 } };
+        int steps = 0;
+        for (int i = 0; i < 8; i++) { BrakeDecide(fs, kField[i][0], kField[i][1], 568, kField[i][2], fc, &ra); steps += ra == BRAKE_STEP; }
+        CHECK(fs.t == 1359 && steps == 2, "up: the field replay ends at 1,359 MB after two steps, not 1,103 after four (%d, %d steps)", fs.t, steps);
+
+        // BRAKEN2 replayed second by second through the two-way rule: the hold and the three steps exactly as its own
+        // brake took them, and no ceiling and no raise, because L never stood 300 s.
+        BrakeState ks = { 4000, false, -1, 0 };
+        int kAct[8][2] = {}, kN = 0, kRaise = 0;
+        for (size_t i = 0; i < sizeof(kBraken2) / sizeof(kBraken2[0]); i++) {
+            int t = BrakeDecide(ks, (int64_t)kBraken2[i][0] * 100, kBraken2[i][1], kBraken2[i][2], kBraken2[i][3], rc, &ra);
+            if (ra == BRAKE_RAISE) kRaise++;
+            else if (ra != BRAKE_NONE && kN < 8) { kAct[kN][0] = kBraken2[i][0] / 10; kAct[kN][1] = t; kN++; }
+        }
+        CHECK(kN == 4 && kAct[0][0] == 133 && kAct[0][1] == 2818 && kAct[1][0] == 179 && kAct[1][1] == 2690 && kAct[2][0] == 209 && kAct[2][1] == 2562
+              && kAct[3][0] == 558 && kAct[3][1] == 2434 && kRaise == 0 && ks.ceiling == 0,
+              "up: BRAKEN2 replayed: %d actions (%d s %d, %d s %d, %d s %d, %d s %d), %d raises, ceiling %d", kN, kAct[0][0], kAct[0][1],
+              kAct[1][0], kAct[1][1], kAct[2][0], kAct[2][1], kAct[3][0], kAct[3][1], kRaise, ks.ceiling);
+
+        // The car and ped budgets come back with a raise, never past what the sizing set.
+        TrafficBudget keepCar = g_car, keepPed = g_ped; uint32_t keepVeh = g_tVeh;
+        g_ped.on = false;
+        g_car = { (uintptr_t)&g_tVeh, CAR_STOCK, CAR_FULL, 100000000u, 100000000u, 0, true, "car", CAR_NO_POOL }; g_tVeh = 100000000u;
+        TrafficRaise(4000, 800);
+        CHECK(g_tVeh == CAR_NO_POOL && g_car.target == CAR_NO_POOL, "up: the car budget comes back only as far as the sizing held it (%u)", g_tVeh);
+        g_car.target = g_car.written = g_car.fromOther = 250000000u; g_car.sized = 200000000u; g_tVeh = 250000000u;
+        TrafficRaise(4000, 800);
+        CHECK(g_tVeh == 250000000u && g_car.target == 250000000u, "up: a larger value another mod set stands through a raise");
+        g_car.on = false; g_car.target = 40000000u; g_tVeh = 13333333u;
+        TrafficRaise(4000, 800);
+        CHECK(g_tVeh == 13333333u, "up: the game's low-memory values are never touched");
+        g_car = keepCar; g_ped = keepPed; g_tVeh = keepVeh;
+    }
+    // ---- the way back up through the worker: the ceiling proven at the hold, emergencies under 2000 MB, the world
+    // settling again, nothing on the loading screen, then one raise written whole with the car and ped budgets following
+    {
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        CHECK(g_sized && TTabAll(4000) && g_brakeCfg.raiseOn && g_brakeCfg.capMb == 4000 && g_car.sized == 200000000u && g_ped.sized == 180000000u,
+              "up: sized at 4000 with raises on, capped at the sizing's 4000, car and ped remembered (%u, %u)", g_car.sized, g_ped.sized);
+        g_tV = 3300ull << 20;
+        SisTick(18000, 500);
+        CHECK(TTabAll(2870), "up: the hold through the worker");
+        for (int64_t ms = 19000; ms <= 318000; ms += 1000) SisTick(ms, 500);
+        CHECK(g_brakeSt.ceiling == 2870 && TTabAll(2870), "up: the hold level proven after 300 s (%d)", g_brakeSt.ceiling);
+        static uint8_t tMenuB; uintptr_t keepMenuB = g_cs.menu; g_cs.menu = (uintptr_t)&tMenuB; tMenuB = 1;
+        SisTick(330000, 100);
+        CHECK(TTabAll(2870) && g_brakeSt.t == 2870, "up: with a menu open the brake decides nothing, not even an emergency");
+        tMenuB = 0; g_cs.menu = keepMenuB;
+        int64_t ms = 330000;
+        while (g_brakeSt.t >= 2000 && ms < 500000) { SisTick(ms, 100); ms += 11000; }
+        int low = g_brakeSt.t;
+        CHECK(low == 1974 && TTabAll(1974) && g_tVeh == CarPedFor(CAR_STOCK, CAR_FULL, 1974, TStockFloor(2)) && g_tPed == CarPedFor(PED_STOCK, PED_FULL, 1974, TStockFloor(2)),
+              "up: emergencies down to %d, car and ped follow (%u, %u)", low, g_tVeh, g_tPed);
+        g_tV = 2480ull << 20;                                 // pressing 1974 (its wall is 2,493 MB)
+        for (; ms < 696000; ms += 1000) SisTick(ms, 500);
+        CHECK(TTabAll(1974), "up: no raise until 300 s after the last emergency");
+        g_tLoad = 1; SisTick(696000, 500);
+        CHECK(TTabAll(1974), "up: nothing on the loading screen");
+        g_tLoad = 0; SisTick(697000, 500);
+        CHECK(TTabAll(2102) && g_brakeSt.t == 2102 && g_tVeh == 200000000u && g_tPed == 180000000u,
+              "up: one raise, written whole, and the car and ped budgets come back (%d, car %u, ped %u)", g_brakeSt.t, g_tVeh, g_tPed);
+        // 400 s in a menu count for nothing (the 1.0.4 review, brake-2): the world presses the raise at 698 s, and the next
+        // raise waits 300 s of play from there, not 300 s of the clock. Counted by the clock it came at 1,100 s.
+        g_tV = 2600ull << 20; SisTick(698000, 500); SisTick(699000, 500);
+        static uint8_t tMenuU; uintptr_t keepMenuU = g_cs.menu; g_cs.menu = (uintptr_t)&tMenuU; tMenuU = 1;
+        for (int64_t m2 = 700000; m2 < 1100000; m2 += 1000) SisTick(m2, 500);
+        tMenuU = 0;
+        int64_t upAt2 = -1;
+        for (int64_t m2 = 1100000; m2 <= 1500000 && upAt2 < 0; m2 += 1000) { SisTick(m2, 500); if (g_brakeSt.t > 2102) upAt2 = m2; }
+        CHECK(upAt2 == 1398000 && TTabAll(2230), "up: after 400 s in a menu the next raise waits for 300 s of play (at %lld s)", upAt2 / 1000);
+        g_cs.menu = keepMenuU;
+        int64_t act0 = g_brakeSt.lastActMs;
+        g_tStreamN = 0; SisTick(1400000, 500); SisTick(1401000, 500);          // the world not readable (the streamer down): not play either
+        g_tStreamN = 1; SisTick(1402000, 500);
+        CHECK(g_brakeSt.lastActMs == act0 + 2000 && g_brakePauseMs == 0, "up: two ticks with the world not readable move the windows on by 2 s");
+        // After a load the render targets hold the loading screen's small set while the world builds: not a resolution
+        // drop, so the ceiling stays (the 1.0.4 review, the judge's new finding).
+        int ceil0 = g_brakeSt.ceiling;
+        g_tLoad = 1; SisTick(1500000, 500); SisTick(1501000, 500);
+        g_tLoad = 0; g_tRt0 = 63ull << 20;
+        for (int i = 0; i < 6; i++) SisTick(1502000 + 1000 * i, 500);
+        CHECK(g_brakeSt.ceiling == ceil0 && ceil0 == 2870 && g_brakeSt.xRef == 799 && g_ldEdgeMs != 0,
+              "up: six ticks of the loading screen's 63 MB after a load leave the ceiling at %d", g_brakeSt.ceiling);
+        g_tRt0 = 799ull << 20; for (int i = 0; i < 5; i++) SisTick(1508000 + 1000 * i, 500);
+        // Judged, the set can still hold a stage short of the finished one (the second audit, brake-3): 765 MB for 12 ticks
+        // after the player appeared, the verdict after three of them, then 799. Not a resolution drop either.
+        g_tLoad = 1; SisTick(1520000, 500); SisTick(1521000, 500);
+        g_tLoad = 0; g_tRt0 = 765ull << 20;
+        for (int i = 0; i < 12; i++) SisTick(1522000 + 1000 * i, 500);
+        CHECK(g_ldVerdict && g_ldEdgeMs == 0 && g_ldSettleMs == 1522000 && g_brakeSt.ceiling == ceil0 && g_brakeSt.xRef == 799 && g_sizedX == 799,
+              "up: 765 MB for 12 ticks after a load, judged after three: the ceiling stays %d, the brake and the resize keep 799 (%d, %d)",
+              g_brakeSt.ceiling, (int)g_brakeSt.xRef, g_sizedX);
+        g_tRt0 = 799ull << 20; SisTick(1534000, 500);
+        CHECK(g_ldSettleMs == 0, "up: the finished set back: the load is done with");
+        // A smaller set that holds is a resolution after all: from LOAD_CEILING_MS after the edge it is taken as it is.
+        g_tLoad = 1; SisTick(1540000, 500); SisTick(1541000, 500);
+        g_tLoad = 0; g_tRt0 = 765ull << 20;
+        int64_t xAt = -1;
+        for (int64_t m4 = 1542000; m4 <= 1542000 + LOAD_CEILING_MS + 10000 && xAt < 0; m4 += 1000) { SisTick(m4, 500); if (g_brakeSt.xRef == 765) xAt = m4; }
+        CHECK(xAt == 1542000 + LOAD_CEILING_MS + 2000 && g_sizedX == 765 && g_brakeSt.ceiling == g_brakeSt.t,
+              "up: 765 MB held past LOAD_CEILING_MS after the load is a resolution: taken on the third tick after it (%lld s)", xAt / 1000);
+        g_tRt0 = 799ull << 20;
+    }
+    // ---- the game's own memory figures (reports/raw/clamp-research-2026-09-26): taken only where the code around them
+    // reads as expected; watched, never written; a clamp logged and followed by the brake, a reset's blip ignored
+    {
+        static uint64_t fV, fS, fSaved, fDead, fS2, fCv, fCs; static uint8_t fRestore[32], fGate[5];
+        auto plant = [&]() {
+            const uintptr_t order[4] = { (uintptr_t)&fSaved, (uintptr_t)&fV, (uintptr_t)&fDead, (uintptr_t)&fS };
+            for (int i = 0; i < 4; i++) {
+                fRestore[8 * i] = i % 2 ? 0x66 : 0xF3; fRestore[8 * i + 1] = 0x0F; fRestore[8 * i + 2] = i % 2 ? 0xD6 : 0x7E; fRestore[8 * i + 3] = 0x05;
+                uint32_t a = (uint32_t)order[i]; memcpy(fRestore + 8 * i + 4, &a, 4);
+            }
+            static const uint8_t g[5] = { 0x3D, 0x7C, 0x01, 0x76, 0x88 }; memcpy(fGate, g, 5);
+        };
+        uintptr_t wv = 0, ws = 0, wsv = 0;
+        auto sites = [&]() { FigSites(wv, ws, wsv, (uintptr_t)fRestore, 0x40E550, (uintptr_t)fGate, 0x4109D2, (uintptr_t)&fV, (uintptr_t)&fS, (uintptr_t)&fSaved, (uintptr_t)&fDead); };
+        plant(); sites();
+        CHECK(wv == (uintptr_t)&fV && ws == (uintptr_t)&fS && wsv == (uintptr_t)&fSaved && !g_figOff[0], "figures: the stock code around them: watched");
+        fRestore[13] ^= 1; sites();
+        CHECK(!wv && !ws && !wsv && strstr(g_figOff, "0x40E550"), "figures: one byte off in the reset's restore: not watched, and the size line names it (%s)", g_figOff);
+        plant(); fGate[2] = 0x02; sites();
+        CHECK(!wv && strstr(g_figOff, "0x4109D2"), "figures: the clamp's gate changed: not watched (%s)", g_figOff);
+        plant(); sites();
+        auto setFigs = [&](uint64_t vMb, uint64_t sMb) { fV = vMb << 20; fS = sMb << 20; };
+        // Sized at 4000 at 4K (X 799) with the figures as the game starts them: video 8192 (SISCO's -availablevidmem), system 32420.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_fig = FigWatch{}; fSaved = 8192ull << 20; fDead = 0; setFigs(8192, 32420); fCv = 40ull << 20; fCs = 30ull << 20; fS2 = 700ull << 20;
+        g_cs.figVideo = wv; g_cs.figSystem = ws; g_cs.figSaved = wsv; g_cs.cacheS = (uintptr_t)&fS2; g_cs.cachedV = (uintptr_t)&fCv; g_cs.cachedS = (uintptr_t)&fCs;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && TTabAll(4000) && g_fig.accepted && g_fig.video == (8192ull << 20) && g_fig.clamps == 0, "figures: read once at the start, no action (budget 4000)");
+        // A device reset: the system figure 0 for a tick, then back. Not a clamp; the brake skips that tick.
+        setFigs(8192, 0); g_tV = 3300ull << 20; SisTick(20000, 400);         // with V and L that would hold the budget on any other tick
+        CHECK(g_fig.blips == 1 && g_fig.resetTick && g_fig.clamps == 0 && TTabAll(4000) && !g_brakeSt.held && g_brakePauseMs == 20000,
+              "figures: a reset's blip (system 0) is not a clamp, and the brake decides nothing on that tick");
+        g_tV = 0;
+        setFigs(8192, 32420); SisTick(21000, 3000);
+        CHECK(!g_fig.resetTick && g_fig.clamps == 0 && !g_fig.pending, "figures: and back, nothing");
+        // A value read between the game's two dword stores, one tick only: nothing.
+        setFigs(8192, 1340); SisTick(22000, 3000); setFigs(8192, 32420); SisTick(23000, 3000);
+        CHECK(g_fig.clamps == 0 && !g_fig.follow && TTabAll(4000), "figures: a one-tick odd value is not a clamp");
+        // A managed texture fails: both figures down, on two reads. Logged; the brake follows to video - X on the same tick.
+        setFigs(3104, 2000); SisTick(24000, 3000);
+        CHECK(g_fig.clamps == 0 && TTabAll(4000), "figures: one read of a lower value waits for a second");
+        SisTick(25000, 3000);
+        CHECK(g_fig.clamps == 1 && !g_fig.follow && TTabAll(2305) && g_brakeSt.t == 2305 && g_brakeCfg.capMb == 2305 && g_brakeCfg.clampCapMb == 2305
+              && g_brakeSt.lastActMs == 25000 && !g_brakeSt.raised,
+              "figures: a managed clamp (video 8192 -> 3104, system 32420 -> 2000): the brake follows to 3104 - 799 = %d, raises stop there (%d)", g_brakeSt.t, g_brakeCfg.capMb);
+        // A clamp with a loading screen up is logged at once and followed on the first tick with it down.
+        g_tLoad = 1; setFigs(3000, 2000); SisTick(26000, 3000); SisTick(27000, 3000);
+        CHECK(g_fig.clamps == 2 && g_fig.follow && TTabAll(2305), "figures: a second, lower clamp with a loading screen up: logged, the write waits");
+        g_tLoad = 0; SisTick(28000, 3000);
+        CHECK(!g_fig.follow && TTabAll(2201) && g_brakeCfg.capMb == 2201, "figures: followed once the loading screen is down (%d)", g_brakeSt.t);
+        // The game restores them at a device reset: logged; the cap stays, that level failed once.
+        setFigs(8192, 0); SisTick(29000, 3000);
+        setFigs(8192, 32420); SisTick(30000, 3000); SisTick(31000, 3000);
+        CHECK(g_fig.restores == 1 && g_fig.video == (8192ull << 20) && g_brakeCfg.capMb == 2201 && TTabAll(2201), "figures: the game's restore is logged, the cap stays at %d", g_brakeCfg.capMb);
+        // A later clamp that leaves the budget under video - X: no write, the cap only if lower.
+        setFigs(3050, 32420); SisTick(32000, 3000); SisTick(33000, 3000);
+        CHECK(g_fig.clamps == 3 && TTabAll(2201) && g_brakeCfg.capMb == 2201 && g_brakeCfg.clampCapMb == 2201 && !g_fig.follow, "figures: a clamp above the budget writes nothing (budget %d, cap %d)", g_brakeSt.t, g_brakeCfg.capMb);
+        // A system-memory texture fails: the system figure alone. Logged; nothing for the brake to follow.
+        setFigs(3050, 1800); SisTick(34000, 3000); SisTick(35000, 3000);
+        CHECK(g_fig.clamps == 4 && !g_fig.follow && TTabAll(2201), "figures: a system-only clamp is logged and not followed");
+        // Past eight lines only the count moves; the video clamps are still followed.
+        for (int i = 0; i < 6; i++) { setFigs(3040 - 10 * i, 1800); SisTick(36000 + 2000 * i, 3000); SisTick(37000 + 2000 * i, 3000); }
+        CHECK(g_fig.clamps == 10 && TTabAll(2191) && g_brakeSt.t == 2191 && g_brakeCfg.capMb == 2191,
+              "figures: ten clamps counted, the budget follows the lowest figure, 2990 - 799 (%d)", g_brakeSt.t);
+        // The pure follow at the floor: video - X under the floor holds at the floor.
+        BrakeCfg fc = { 512, 32, 128, 192, 20, 800, 1, 4000 }; BrakeState fb = {}; fb.t = 2000; fb.held = true; int fa = -1;
+        CHECK(BrakeFollowClamp(fb, fc, 1000, 1200, 799, 300, false, &fa) == 800 && fa == BRAKE_CLAMP && fc.capMb == 800, "figures: a figure under the floor plus X: the brake stops at the floor (%d)", fb.t);
+        // No brake (the budget left at the game's own): lines only.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); SiteSet(S_LINK_SIZE, ST_OFF_DISABLED, "test");
+        g_fig = FigWatch{}; setFigs(8192, 32420); TSizeSettle(1000, 3000);
+        CHECK(g_sized && !g_brakeOn && memcmp(g_tTab, kCtStockTable, sizeof(g_tTab)) == 0, "figures: with the link pool refused the budget is the game's own and there is no brake");
+        setFigs(3104, 2000); SisTick(20000, 3000); SisTick(21000, 3000);
+        CHECK(g_fig.clamps == 1 && memcmp(g_tTab, kCtStockTable, sizeof(g_tTab)) == 0, "figures: a clamp there is only logged");
+        SiteSet(S_LINK_SIZE, ST_ON, "");
+        // A clamp in the first load: the sizing itself stays under video - X, and says why.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_fig = FigWatch{}; setFigs(3104, 2000); TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == 2305 && TTabAll(2305) && g_brakeCfg.capMb == 2305 && strstr(g_sizeNote, "video figure already lowered to 3104 MB"),
+              "figures: a clamp before the sizing: budget %d, not 4000: %s", g_sizedT, g_sizeNote);
+        // Another mod's larger value in the table, and a clamp in the first load: lowered with the figure, and said so.
+        TSizeReset(1, 5843, CAR_STOCK, PED_STOCK); g_tTab[47] = 4000ull << 20;
+        g_fig = FigWatch{}; setFigs(3104, 2000); TSizeSettle(1000, 3000);
+        CHECK(g_sizedT == 2305 && strstr(g_sizeNote, "a larger table value, lowered to the game's figure") && !strstr(g_sizeNote, "a larger table value kept")
+              && !strstr(g_sizeNote, "another mod"),
+              "figures: a larger value in the table lowered by a first-load clamp is named as lowered, not blamed on a mod: %s", g_sizeNote);
+        // A first-load clamp so low that the game's own budget binds: the note says the game's own budget holds it.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_fig = FigWatch{}; setFigs(1200, 2000); TSizeSettle(1000, 3000);
+        CHECK(g_sizedT == TStockFloor(2) && strstr(g_sizeNote, "the game's own budget holds"),
+              "figures: a first-load clamp under the game's own budget: the budget %d, and the note says the game's own holds it: %s", g_sizedT, g_sizeNote);
+        // A clamp during a load is followed against the finished render targets, not the loading screen's set that the
+        // first tick after it shows (the 1.0.4 review, clamp-1): 63 MB would have given 3041.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_fig = FigWatch{}; setFigs(8192, 32420); TSizeSettle(1000, 3000);
+        g_tLoad = 1; setFigs(3104, 2000); SisTick(30000, 3000); SisTick(31000, 3000);
+        CHECK(g_fig.follow && TTabAll(4000), "figures: a clamp during a load waits for it");
+        g_tLoad = 0; g_tRt0 = 63ull << 20; SisTick(32000, 3000);
+        CHECK(!g_fig.follow && TTabAll(2305) && g_brakeCfg.capMb == 2305,
+              "figures: followed on the first tick after the load against the finished set: 3104 - 799 = %d (the targets read 63)", g_brakeSt.t);
+        g_tRt0 = 799ull << 20;
+        // The game restores its figures before the brake can follow (a clamp with the pause menu open, then a VSync switch
+        // in the same menu; clamp-2): the cap still comes down to the clamp's level, and nothing is written.
+        TSizeReset(1, 5843, CAR_STOCK, PED_STOCK);
+        g_fig = FigWatch{}; setFigs(8192, 32420); TSizeSettle(1000, 3000);
+        int sized6 = g_sizedT;
+        static uint8_t tMenuC; uintptr_t keepMenuC = g_cs.menu; g_cs.menu = (uintptr_t)&tMenuC; tMenuC = 1;
+        setFigs(3104, 2000); SisTick(40000, 3000); SisTick(41000, 3000);
+        setFigs(8192, 0); SisTick(42000, 3000);
+        setFigs(8192, 32420); SisTick(43000, 3000); SisTick(44000, 3000);
+        CHECK(g_fig.clamps == 1 && g_fig.restores == 1 && g_fig.follow && g_fig.followV == (3104ull << 20), "figures: clamped and restored with a menu open: the follow waits, the clamp's figure kept");
+        tMenuC = 0; SisTick(45000, 3000);
+        CHECK(!g_fig.follow && g_brakeCfg.capMb == 2305 && g_brakeSt.t == sized6 && TTabAll(sized6),
+              "figures: the menu closed: raises stop at 2305, the budget stays %d (cap %d)", g_brakeSt.t, g_brakeCfg.capMb);
+        // A resize to larger render targets never lifts that cap (brake-5): the budget comes down to the card's figure,
+        // the cap stays at the clamp's.
+        g_tRt0 = 900ull << 20; SisTick(46000, 3000);
+        CHECK(g_brakeCfg.capMb == 2305 && g_brakeSt.t < sized6 && g_brakeSt.t > 2305,
+              "figures: a resize after the clamp: budget %d -> %d, the cap stays %d", sized6, g_brakeSt.t, g_brakeCfg.capMb);
+        g_tRt0 = 799ull << 20; g_cs.menu = keepMenuC;
+        // Two clamps before the follow, the higher one after a restore (G1): the follow takes the lowest, the cap its level.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_fig = FigWatch{}; setFigs(8192, 32420); TSizeSettle(1000, 3000);
+        static uint8_t tMenuG; uintptr_t keepMenuG = g_cs.menu; g_cs.menu = (uintptr_t)&tMenuG; tMenuG = 1;
+        setFigs(3104, 2000); SisTick(50000, 3000); SisTick(51000, 3000);
+        setFigs(8192, 0); SisTick(52000, 3000); setFigs(8192, 32420); SisTick(53000, 3000); SisTick(54000, 3000);
+        setFigs(3500, 2000); SisTick(55000, 3000); SisTick(56000, 3000);
+        CHECK(g_fig.clamps == 2 && g_fig.followV == (3104ull << 20), "figures: two clamps with a restore between, the follow waiting: the lowest kept (%llu MB)", g_fig.followV >> 20);
+        tMenuG = 0; SisTick(57000, 3000);
+        CHECK(!g_fig.follow && g_brakeCfg.capMb == 2305 && g_brakeCfg.clampCapMb == 2305 && g_brakeSt.t == 4000,
+              "figures: the menu closed: the cap at the lowest clamp's level (%d), the budget untouched (%d)", g_brakeCfg.capMb, g_brakeSt.t);
+        g_cs.menu = keepMenuG;
+        // A resolution changed in a menu while held, then a load straight from it with a clamp in the load (the second
+        // audit, brake-5): the follow reasons with the set the resize took in the menu, not the brake's from before it.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        g_fig = FigWatch{}; setFigs(8192, 32420); TSizeSettle(1000, 3000);
+        g_tV = 3300ull << 20; SisTick(18000, 500); g_tV = 0;
+        static uint8_t tMenuR; uintptr_t keepMenuR = g_cs.menu; g_cs.menu = (uintptr_t)&tMenuR; tMenuR = 1;
+        g_tRt0 = 252ull << 20; for (int i = 0; i < 4; i++) SisTick(19000 + 1000 * i, 3000);
+        CHECK(g_brakeSt.held && g_brakeSt.t == 2870 && g_sizedX == 252 && g_brakeSt.xRef == 799,
+              "figures: held at %d, then 1080p chosen in the menu: taken by the resize (%d), not by the brake (%d)", g_brakeSt.t, g_sizedX, (int)g_brakeSt.xRef);
+        tMenuR = 0; g_tLoad = 1; setFigs(3104, 2000); SisTick(23000, 3000); SisTick(24000, 3000);
+        g_tLoad = 0; g_tRt0 = 63ull << 20; SisTick(25000, 3000);
+        CHECK(!g_fig.follow && g_brakeSt.t == 2852 && TTabAll(2852) && g_brakeCfg.capMb == 2852,
+              "figures: the clamp in that load followed against 252 MB: 3104 - 252 = %d, not 3104 - 799 (cap %d)", g_brakeSt.t, g_brakeCfg.capMb);
+        g_tRt0 = 799ull << 20; g_cs.menu = keepMenuR;
+        // The game's own answer low from the start, no clamp (a player's log, FINDINGS 8av: 2048 MB on a 16 GB card with
+        // render targets of 1113 MB, though SISCO had asked for the card's figure): the sizing stays under it less the
+        // render targets, the car and ped budgets with it, the brake's raises stop there, and both lines say whose
+        // figure it is. Until 1.0.5 this sized 4000 and gave cars and peds 380 MB of a world the game held to 935.
+        TSizeReset(1, 15209, CAR_STOCK, PED_STOCK); g_tRt0 = 1113ull << 20;
+        g_fig = FigWatch{}; fSaved = 2048ull << 20; setFigs(2048, 63092); g_vidmemSetMb = 15209;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == 935 && TTabAll(935) && g_brakeOn && g_brakeSt.t == 935 && g_brakeCfg.capMb == 935 && g_fig.clamps == 0
+              && g_tVeh == CarPedFor(CAR_STOCK, CAR_FULL, 935, TStockFloor(2)) && g_tPed == CarPedFor(PED_STOCK, PED_FULL, 935, TStockFloor(2))
+              && g_tVeh > CAR_STOCK && g_tVeh < CAR_FULL / 2
+              && strstr(g_sizeNote, "the card allows 11865); the game's own video figure is 2048 MB: the budget stays under it less the render targets")
+              && !strstr(g_sizeNote, "failed create"),
+              "figures: the game's own answer 2048 MB at 1113 MB of render targets: budget %d, car %u, ped %u: %s", g_sizedT, g_tVeh, g_tPed, g_sizeNote);
+        // The same so low that the game's own budget binds: the budget is the game's own, and so are cars and peds.
+        TSizeReset(1, 15209, CAR_STOCK, PED_STOCK); g_tRt0 = 1113ull << 20;
+        g_fig = FigWatch{}; fSaved = 1500ull << 20; setFigs(1500, 63092); g_vidmemSetMb = 15209;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sizedT == TStockFloor(2) && g_tVeh == CAR_STOCK && g_tPed == PED_STOCK
+              && strstr(g_sizeNote, "the game's own video figure is 1500 MB: the game's own budget holds"),
+              "figures: the game's own answer under its own budget plus the render targets: budget %d, cars and peds the game's: %s", g_sizedT, g_sizeNote);
+        // The figure SISCO asked for, taken: the full budget, and neither line mentions it.
+        TSizeReset(1, 15209, CAR_STOCK, PED_STOCK); g_tRt0 = 1113ull << 20;
+        g_fig = FigWatch{}; fSaved = 15209ull << 20; setFigs(15209, 63092); g_vidmemSetMb = 15209;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sizedT == T_MAX_MB && TTabAll(T_MAX_MB) && g_tVeh == CAR_FULL && g_tPed == PED_FULL && !strstr(g_sizeNote, "video figure"),
+              "figures: the figure SISCO set, taken by the game: budget %d, nothing said: %s", g_sizedT, g_sizeNote);
+        g_tRt0 = 799ull << 20; fSaved = 8192ull << 20; g_vidmemSetMb = 0;
+        g_cs.figVideo = g_cs.figSystem = g_cs.figSaved = 0; g_cs.cacheS = g_cs.cachedV = g_cs.cachedS = 0; g_fig = FigWatch{};
     }
     // ---- the budget rule and the car and ped rule, against a table worked out by hand
     {
@@ -1150,26 +1853,161 @@ static void CoreTests() {
         CHECK(TTabAll(held), "brake: nothing on the loading screen");
         g_tLoad = 0;
         g_bootBudgetMb = 4000; g_tRt0 = 1800ull << 20; SisTick(ms + 1000, 3000);   // render targets big enough to reach the floor
-        CHECK(TTabAll(TStockFloor(2)) && g_brakeSt.t == TStockFloor(2) && g_brakeCfg.floorMb <= TStockFloor(2) && g_tVeh == CAR_STOCK && g_tPed == 250000000u,
-              "world: the render targets grew on a 4 GB card: the budget lowered to the game's own, the cars follow to the game's own, the larger ped budget stands");
+        CHECK(TTabAll(TStockFloor(2)) && g_brakeSt.t == TStockFloor(2) && g_brakeCfg.floorMb <= TStockFloor(2) && g_tVeh == CAR_STOCK && g_tPed == 250000000u
+              && g_sizedT == TStockFloor(2) && g_brakeCfg.capMb == TStockFloor(2),
+              "world: the render targets grew on a 4 GB card: the budget lowered to the game's own, the cars follow to the game's own, the larger ped budget stands, and no raise may go past it");
         g_tRt0 = 373ull << 20; SisTick(ms + 2000, 3000);
         CHECK(TTabAll(TStockFloor(2)), "world: smaller render targets never raise it");
         g_tVeh = 150000000u; SisTick(ms + 3000, 3000);
         CHECK(g_tVeh == 150000000u && g_car.target == 150000000u && g_car.fromOther == 150000000u,
               "guard: after the brake, a larger car budget from another mod still stands");
+        // The resolution back down (2026-09-27, the owner: fix before release): on a card that lowered the budget for the
+        // larger set, what the card allows comes back once the smaller set has held three ticks, where the brake has not
+        // held; never on a reset's one-tick dip, never on a load's small set, never past a followed clamp's cap.
+        TSizeReset(1, 5843, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        int s6 = g_sizedT;
+        CHECK(s6 > 3000 && g_sizedT0 == s6 && g_stockFloorQ[0] == TStockFloor(0) && g_stockFloorQ[1] == TStockFloor(1) && g_stockFloorQ[2] == TStockFloor(2) && g_floorQ == 2,
+              "resize: sized at %d on a 6 GB card, the game's own budgets for all three qualities read before the write (%d, %d, %d)",
+              s6, g_stockFloorQ[0], g_stockFloorQ[1], g_stockFloorQ[2]);
+        g_tRt0 = 1100ull << 20; SisTick(20000, 3000);
+        int big = g_brakeSt.t;
+        CHECK(big < s6 && g_sizedT == big && g_brakeCfg.capMb == big && TTabAll(big) && !g_brakeSt.held, "resize: a larger resolution lowers the budget (%d)", big);
+        g_tRt0 = 518ull << 20; SisTick(21000, 3000); g_tRt0 = 1100ull << 20; SisTick(22000, 3000);
+        CHECK(g_brakeSt.t == big && g_sizedX == 1100, "resize: a reset's one-tick dip gives nothing back");
+        g_tRt0 = 799ull << 20; SisTick(23000, 3000); SisTick(24000, 3000);
+        CHECK(g_brakeSt.t == big, "resize: two ticks at the old resolution, nothing yet");
+        SisTick(25000, 3000);
+        CHECK(g_brakeSt.t == s6 && TTabAll(s6) && g_sizedT == s6 && g_brakeCfg.capMb == s6 && g_sizedX == 799,
+              "resize: on the third the budget comes back to what the card allows (%d)", g_brakeSt.t);
+        g_tLoad = 1; SisTick(30000, 3000); g_tLoad = 0; g_tRt0 = 63ull << 20;
+        for (int i = 0; i < 5; i++) SisTick(31000 + 1000 * i, 3000);
+        CHECK(g_brakeSt.t == s6 && g_sizedX == 799 && g_shrinkTicks == 0 && g_ldEdgeMs != 0, "resize: a load's small set is not a resolution");
+        g_tRt0 = 799ull << 20;
+        TSizeReset(1, 5843, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        g_tRt0 = 1100ull << 20; SisTick(20000, 3000);
+        g_tRt0 = 500ull << 20; for (int i = 0; i < 3; i++) SisTick(21000 + 1000 * i, 3000);   // smaller than at sizing
+        CHECK(g_brakeSt.t == s6 && g_sizedT == s6 && g_sizedX == 500, "resize: a smaller resolution than at sizing gives back no more than the sizing's own %d (%d)", s6, g_brakeSt.t);
+        g_tRt0 = 799ull << 20;
+        TSizeReset(1, 5843, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        g_tRt0 = 1100ull << 20; SisTick(20000, 3000);
+        g_brakeCfg.clampCapMb = 3300;                                        // a clamp the brake followed, at 3300
+        g_tRt0 = 799ull << 20; for (int i = 0; i < 3; i++) SisTick(21000 + 1000 * i, 3000);
+        CHECK(g_brakeSt.t == 3300 && g_brakeCfg.capMb == 3300 && g_sizedT == s6 && TTabAll(3300), "resize: given back only as far as a followed clamp's cap (%d)", g_brakeSt.t);
+        // Where the brake holds, the address space is the limit: the sizing's figure and the cap come back, the budget stays.
+        TSizeReset(1, 5843, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        g_tV = 3300ull << 20; SisTick(18000, 500);
+        int heldT = g_brakeSt.t;
+        g_tRt0 = 1100ull << 20; SisTick(19000, 500);
+        g_tRt0 = 799ull << 20; for (int i = 0; i < 3; i++) SisTick(20000 + 1000 * i, 500);
+        CHECK(g_brakeSt.held && g_brakeSt.t == heldT && g_sizedT == s6 && TTabAll(heldT), "resize: held, the budget stays %d while the card's figure comes back (%d)", heldT, g_sizedT);
+        // Texture quality changed mid-session: the brake's floor follows the game's own budget for it.
+        g_tQual = 0; SisTick(30000, 500);
+        CHECK(g_floorQ == 0 && g_brakeCfg.floorMb == TStockFloor(0), "quality: low, the floor follows the game's own budget for it (%d)", g_brakeCfg.floorMb);
+        g_tQual = 2; SisTick(31000, 500);
+        CHECK(g_floorQ == 2 && g_brakeCfg.floorMb == TStockFloor(2), "quality: back to high, the floor too (%d)", g_brakeCfg.floorMb);
+        g_brakeSt.t = TStockFloor(1) - 10; g_tQual = 1; SisTick(32000, 500);   // a budget the brake had taken under medium's
+        CHECK(g_brakeCfg.floorMb == TStockFloor(1) && g_brakeSt.t == TStockFloor(1) - 10, "quality: a held budget under the new floor stays there (%d)", g_brakeSt.t);
+        g_tQual = 2; g_tV = 0;
+        // The car and ped budgets come back with a give-back (R10): a larger set that takes the budget under 2000 MB.
+        TSizeReset(1, 5843, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        g_tRt0 = 2000ull << 20; SisTick(20000, 3000);
+        CHECK(g_brakeSt.t < 2000 && g_tVeh < 200000000u, "resize: a much larger set takes the budget under 2000 (%d) and the cars follow (%u)", g_brakeSt.t, g_tVeh);
+        g_tRt0 = 799ull << 20; for (int i = 0; i < 3; i++) SisTick(21000 + 1000 * i, 3000);
+        CHECK(g_brakeSt.t == s6 && g_tVeh == 200000000u && g_tPed == 180000000u, "resize: the give-back brings the car and ped budgets back too (%u, %u)", g_tVeh, g_tPed);
+        // The floor at a resize (R2, R12, and the second audit's brake-4): sized at low quality on a 3 GB card, raised to
+        // high, then a resolution round trip: the larger set lowers the budget no further than high's own, as a sizing at
+        // high gives (the card's figure there is 354), the floor stays there, and the smaller set gives the card's back.
+        TSizeReset(1, 3000, CAR_STOCK, PED_STOCK); g_tQual = 0; TSizeSettle(1000, 3000);
+        int s3 = g_sizedT;
+        g_tQual = 2; SisTick(20000, 3000);
+        int fHigh = g_brakeCfg.floorMb;
+        g_tRt0 = 1100ull << 20; SisTick(21000, 3000);
+        int fLow = g_brakeCfg.floorMb, bigT = g_brakeSt.t;
+        g_tRt0 = 799ull << 20; for (int i = 0; i < 3; i++) SisTick(22000 + 1000 * i, 3000);
+        CHECK(s3 > TStockFloor(2) && fHigh == TStockFloor(2) && bigT == TStockFloor(2) && fLow == fHigh && g_brakeCfg.floorMb == fHigh && g_brakeSt.t == s3,
+              "resize: after a raise to high a larger set stops at high's own (%d, floor %d), and the budget comes back to %d", bigT, fLow, g_brakeSt.t);
+        // Held, a raise to high leaves the budget and the floor where the card allowed at low (354); a smaller set then gives
+        // back the card's figure at high's own, as a sizing at high gives, and the floor with it.
+        TSizeReset(1, 3000, CAR_STOCK, PED_STOCK); g_tQual = 0; TSizeSettle(1000, 3000);
+        g_tRt0 = 1100ull << 20; SisTick(20000, 3000);
+        int lowBig = g_brakeSt.t;
+        g_tV = 1400ull << 20; SisTick(21000, 500);
+        g_tQual = 2; SisTick(22000, 500);
+        CHECK(lowBig == SizeBudget(3000, 1100, TStockFloor(0), false, NULL) && lowBig < TStockFloor(2) && g_brakeSt.held && g_brakeSt.t == lowBig
+              && g_brakeCfg.floorMb == lowBig && TTabAll(lowBig),
+              "quality: held, raised to high: the budget stays %d and the floor stops there (%d)", g_brakeSt.t, g_brakeCfg.floorMb);
+        g_tRt0 = 1000ull << 20; for (int i = 0; i < 3; i++) SisTick(23000 + 1000 * i, 500);
+        CHECK(g_brakeSt.t == lowBig && g_sizedT == TStockFloor(2) && g_brakeCfg.floorMb == TStockFloor(2) && TTabAll(lowBig),
+              "resize: held at high, a smaller set: the card's figure back at high's own (%d), the floor with it (%d), the budget held", g_sizedT, g_brakeCfg.floorMb);
+        g_tV = 0; g_tRt0 = 799ull << 20;
+        // A raise to high on a small card sized at low (the second audit, brake-4): the budget under high's own comes up to
+        // it where the brake has not held, as a sizing at high gives, with the car budget a larger set had taken.
+        TSizeReset(1, 1948, CAR_STOCK, PED_STOCK); g_tQual = 0; g_tRt0 = 373ull << 20; TSizeSettle(1000, 3000);
+        int sLow = g_sizedT;
+        g_tRt0 = 1100ull << 20; SisTick(20000, 3000);
+        CHECK(sLow == SizeBudget(1948, 373, TStockFloor(0), false, NULL) && sLow < TStockFloor(2) && g_brakeSt.t == TStockFloor(0) && g_tVeh < g_car.sized,
+              "quality: a 2 GB card sized at low (%d); a larger set takes it to low's own (%d) and the cars follow (%u)", sLow, g_brakeSt.t, g_tVeh);
+        g_tQual = 2; SisTick(21000, 3000);
+        CHECK(TTabAll(TStockFloor(2)) && g_brakeSt.t == TStockFloor(2) && g_sizedT == TStockFloor(2) && g_sizedT0 == TStockFloor(2)
+              && g_brakeCfg.capMb == TStockFloor(2) && g_brakeCfg.floorMb == TStockFloor(2) && g_tVeh == g_car.sized,
+              "quality: raised to high, not held: the budget up to high's own (%d), the cap and the sizing's figure with it, the cars back (%u)", g_brakeSt.t, g_tVeh);
+        g_tQual = 0; SisTick(22000, 3000);
+        CHECK(g_brakeSt.t == TStockFloor(2) && TTabAll(TStockFloor(2)) && g_brakeCfg.floorMb == TStockFloor(0),
+              "quality: back to low, only the floor moves (budget %d, floor %d)", g_brakeSt.t, g_brakeCfg.floorMb);
+        g_tQual = 2; g_tRt0 = 799ull << 20;
+        // With the loading flag up, a small set is the loading screen's too (the second audit, brake-1): no give-back, and
+        // the finished set stays the one the brake and the clamp follow reason with.
+        TSizeReset(1, 5843, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        g_tRt0 = 1100ull << 20; SisTick(20000, 3000);
+        int big2 = g_brakeSt.t;
+        g_tLoad = 1; g_tRt0 = 63ull << 20; for (int i = 0; i < 4; i++) SisTick(21000 + 1000 * i, 3000);
+        CHECK(g_brakeSt.t == big2 && g_sizedX == 1100 && TTabAll(big2), "resize: four ticks of a loading screen's 63 MB with the flag up give nothing back (%d, X %d)", g_brakeSt.t, g_sizedX);
+        g_tLoad = 0; g_tRt0 = 799ull << 20;
+        // A resolution drop on a card that never lowered the budget gives nothing back and says nothing (R7).
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        g_tRt0 = 900ull << 20; SisTick(20000, 3000);
+        g_tRt0 = 799ull << 20; for (int i = 0; i < 4; i++) SisTick(21000 + 1000 * i, 3000);
+        CHECK(g_brakeSt.t == 4000 && g_sizedT == 4000 && g_sizedX == 799, "resize: a large card, a smaller set: nothing to give back, only the set recorded (%d)", g_sizedX);
+        g_tRt0 = 799ull << 20;
+        // A card that allows less than the game's own: the size line says the budget is the game's own, with no arrow.
+        TSizeReset(1, 1948, CAR_STOCK, PED_STOCK); g_tQual = 0; TSizeSettle(1000, 3000);
+        char ownB[64]; _snprintf_s(ownB, sizeof(ownB), _TRUNCATE, "budget %d MB, the game's own (card 1948 MB", TStockFloor(0));
+        CHECK(g_sizedT == TStockFloor(0) && strstr(g_sizeNote, ownB) && !strstr(g_sizeNote, "budget " "300 ->"), "size: a small card at the game's own: %s", g_sizeNote);
+        g_tQual = 2;
+        // A loading screen never delays an emergency (the second audit, brake-2): a hold at 18 s, a loading screen from
+        // 19 to 48 s, then L under the emergency line: the emergency comes on the first tick after it, as in 1.0.3.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        g_tV = 3300ull << 20; SisTick(18000, 500);
+        int h18 = g_brakeSt.t;
+        g_tLoad = 1; for (int64_t m3 = 19000; m3 <= 48000; m3 += 1000) SisTick(m3, 500);
+        g_tLoad = 0; SisTick(49000, 150);
+        CHECK(g_brakeSt.held && g_brakeSt.t == h18 - 128 && g_brakeSt.downMs == 49000, "brake: the emergency right after a loading screen, not 10 s later (%d -> %d)", h18, g_brakeSt.t);
+        // And the loading screen still counts as no play for the raise's windows (rest-4): the hold's 300 s wait moved on.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        g_tV = 3300ull << 20; SisTick(18000, 500);
+        g_tLoad = 1; for (int64_t m3 = 19000; m3 <= 48000; m3 += 1000) SisTick(m3, 500);
+        g_tLoad = 0; SisTick(49000, 500);
+        CHECK(g_brakeSt.lastActMs == 48000 && g_brakeSt.downMs == 18000, "brake: 30 s of loading screen move the raise's clock on by 30 s (%lld), not the emergency's (%lld)",
+              g_brakeSt.lastActMs, g_brakeSt.downMs);
+        g_tV = 0;
         TSizeReset(0, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
         CHECK(g_sized && memcmp(g_tTab, kCtStockTable, sizeof(g_tTab)) == 0 && g_tVeh == CAR_STOCK && g_tPed == PED_STOCK && !g_brakeOn && strstr(g_sizeNote, "native"),
               "world: native Direct3D 9: the table, the car and ped budgets untouched, no brake");
         TSizeReset(1, 23370, CAR_STOCK / 3, PED_STOCK / 3); TSizeSettle(1000, 3000);
         CHECK(TTabAll(4000) && g_tVeh == CAR_STOCK / 3 && g_tPed == PED_STOCK / 3 && !g_car.on, "world: the game's low-memory car and ped budgets stay");
+        CHECK(strstr(g_sizeNote, "; car 13 MB, ped 16 MB (the game's low-memory values kept)") != NULL,
+              "world: values SISCO left alone read without an arrow: %s", g_sizeNote);
         TSizeReset(1, 6000, CAR_STOCK, PED_STOCK); g_tGafm[0] = 0xE9; TSizeSettle(1000, 3000);
-        CHECK(g_sizedT == SizeBudget(6000, 799, 800, true, NULL) && TTabAll(g_sizedT) && strstr(g_sizeNote, "ExtraStreamingMemory"),
-              "world: FusionFix's ExtraStreamingMemory: sized for its multiplier (%d)", g_sizedT);
+        CHECK(g_sizedT == SizeBudget(6000, 799, 800, true, NULL) && TTabAll(g_sizedT) && strstr(g_sizeNote, "ExtraStreamingMemory")
+              && !g_brakeCfg.raiseOn && strstr(g_sizeNote, "brake lowers only (ExtraStreamingMemory)"),
+              "world: FusionFix's ExtraStreamingMemory: sized for its multiplier, and the brake only lowers (%d): %s", g_sizedT, g_sizeNote);
         TSizeReset(1, 6000, CAR_STOCK, PED_STOCK); g_tTab[47] = 4000ull << 20; TSizeSettle(1000, 3000);
-        CHECK(TTabAll(4000) && strstr(g_sizeNote, "larger value already in the table"), "world: a larger value already in the table stands");
+        CHECK(TTabAll(4000) && strstr(g_sizeNote, "a larger table value kept"), "world: a larger value already in the table stands");
         TSizeReset(1, 23370, 250000000u, PED_STOCK); TSizeSettle(1000, 3000);
-        CHECK(g_tVeh == 250000000u && g_car.target == 250000000u && g_tPed == 180000000u && strstr(g_sizeNote, "another mod set kept"),
+        CHECK(g_tVeh == 250000000u && g_car.target == 250000000u && g_tPed == 180000000u && strstr(g_sizeNote, "another mod's larger value kept"),
               "world: FusionFix's larger car budget, there before the world loaded, stands");
+        CHECK(strstr(g_sizeNote, "; car 250 MB, ped 50 -> 180 MB (another mod's larger value kept)") != NULL,
+              "world: the size line gives the ped budget's own figure beside SISCO's, and the car budget another mod set as it is: %s", g_sizeNote);
         // The value another mod set before the world loaded is its value, so the brake may not take it either. Before
         // this was recorded at sizing, the guard's floor was zero and a brake step cut it to the game's own.
         TSizeReset(1, 23370, 250000000u, PED_STOCK); TSizeSettle(1000, 3000);
@@ -1258,6 +2096,24 @@ static void CoreTests() {
         CHECK(g_loadN == 2 && g_worldMs == 22000 && !g_ldVerdict, "load: a save switch is a new load with its own edge");
         g_tRt0 = 799ull << 20; SisTick(44000, 3000); for (int i = 45; i <= 47; i++) SisTick(i * 1000, 3000);
         CHECK(g_ldVerdict && g_loadBuildS == 22, "load: and it is timed on its own (%lld s)", g_loadBuildS);
+        // The taxi throttle's arming through the worker's own tick: nothing on the splash and loading screens before the
+        // first world, armed once the player is in and the count has moved on two ticks in a row; never on a still count.
+        {
+            static uint32_t wf = 900; uintptr_t keepF = g_cs.frame, keepM = g_cs.menu; g_cs.frame = (uintptr_t)&wf; g_cs.menu = 0;
+            TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_rpArmed = false; g_flSampled = false; g_flDisarmed = false; g_flStuck = 0; g_flMoved = 0;
+            TPlayerInWorld(false); SisTick(1000, 3000); wf += 60; SisTick(2000, 3000);   // a splash: the count moves, nobody in the world
+            g_tLoad = 1; wf += 60; SisTick(3000, 3000); wf += 60; SisTick(4000, 3000);
+            CHECK(!g_rpArmed && !g_worldLogged, "present: the splash and the first loading screen do not arm the taxi throttle");
+            g_tLoad = 0; TPlayerInWorld(true); g_tRt0 = 63ull << 20; wf += 60; SisTick(5000, 3000);
+            CHECK(!g_rpArmed && g_worldLogged, "present: the player appeared with the count moving: one tick is not enough yet");
+            wf += 60; SisTick(6000, 3000);
+            CHECK(g_rpArmed, "present: the second tick in a row: the worker arms it");
+            // A second world edge with the count held still: the edge itself arms nothing (the second audit, rest-2).
+            g_rpArmed = false; g_flMoved = 0;
+            g_tLoad = 1; SisTick(20000, 3000); g_tLoad = 0; SisTick(21000, 3000); SisTick(22000, 3000); SisTick(23000, 3000);
+            CHECK(!g_rpArmed, "present: a world edge with a still count arms nothing");
+            g_cs.frame = keepF; g_cs.menu = keepM; g_rpArmed = false; g_flSampled = false;
+        }
         // The presents from the worker's side, with the hook in: skipped at 33 ms while a loading screen is up, at 100 ms
         // from the edge until the finished set has held a tick, not at the menu; a new load's flag starts over.
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_swapVtblHooked = g_tSwapVtbl;
@@ -1351,8 +2207,9 @@ static void CoreTests() {
         g_tAddrSpace.largest = 269ull << 20; g_tAddrSpace.total = 1400ull << 20; g_tAddrSpace.blocks = 17;
         TSizeSettle(1000, 3000);
         CHECK(g_sized && g_sizedT == WINE_BUDGET_MAX_MB && TTabAll(WINE_BUDGET_MAX_MB) && g_brakeOn && g_brakeCfg.holdMb == 134 && g_brakeCfg.emergencyMb == 67
-              && strstr(g_sizeNote, "2000 is the most SISCO asks for on Wine with a layout this fragmented") && strstr(g_sizeNote, "address space 1400 MB free in 17 blocks, the largest 269 MB"),
-              "wine: 4000 becomes 2000, the brake holds at 134 and panics at 67, the layout is logged: %s", g_sizeNote);
+              && strstr(g_sizeNote, "capped at 2000 on Wine (fragmented address space)") && strstr(g_sizeNote, "address space 1400 MB free in 17 blocks, the largest 269 MB")
+              && !g_brakeCfg.raiseOn && strstr(g_sizeNote, "brake lowers only (Wine, lines lowered)"),
+              "wine: 4000 becomes 2000, the brake holds at 134 and panics at 67 and only lowers, the layout is logged: %s", g_sizeNote);
         BrakeCfg wc = g_brakeCfg; BrakeState ws = { 2000, false, -1, 0 }; int wa = -1;
         CHECK(BrakeDecide(ws, 1000, 300, 110, 269, wc, &wa) == 2000 && wa == BRAKE_NONE, "wine: the Deck's 269 MB at sizing is not a hold there");
         CHECK(BrakeDecide(ws, 2000, 300, 110, 130, wc, &wa) == TStockFloor(2) && wa == BRAKE_HOLD, "wine: a fall to half of it is, to the floor (%d)", ws.t);
@@ -1360,14 +2217,147 @@ static void CoreTests() {
         CHECK(g_sized && g_sizedT == 3000, "wine: another mod's 3000 in the table stands above the cap (%d)", g_sizedT);
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tAddrSpace.largest = 2500ull << 20; g_tAddrSpace.total = 2600ull << 20; g_tAddrSpace.blocks = 2;
         TSizeSettle(1000, 3000);
-        CHECK(g_sized && g_sizedT == 4000 && g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 192 && !strstr(g_sizeNote, "most SISCO asks") && strstr(g_sizeNote, "the largest 2500 MB"),
-              "wine: a desktop Linux layout with a 2500 MB block is sized as Windows is, with the Windows lines, and logged (%d): %s", g_sizedT, g_sizeNote);
+        CHECK(g_sized && g_sizedT == 4000 && g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 192 && !strstr(g_sizeNote, "capped at 2000") && strstr(g_sizeNote, "the largest 2500 MB")
+              && g_brakeCfg.raiseOn && !strstr(g_sizeNote, "brake lowers only"),
+              "wine: a desktop Linux layout with a 2500 MB block is sized as Windows is, with the Windows lines and raises, and logged (%d): %s", g_sizedT, g_sizeNote);
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tAddrSpace.largest = 1023ull << 20; g_tAddrSpace.total = 2000ull << 20; g_tAddrSpace.blocks = 5;
         TSizeSettle(1000, 3000);
         CHECK(g_sized && g_sizedT == WINE_BUDGET_MAX_MB && g_brakeCfg.holdMb == 511, "wine: one MB under the roomy line is still capped, with the lines from the block (%d, hold %d)", g_sizedT, g_brakeCfg.holdMb);
+        // Proton's WoW64 mode is read from the environment Wine hands the game: exactly "1" is on.
+        SetEnvironmentVariableA("PROTON_USE_WOW64", NULL); bool w0 = ProtonWow64();
+        SetEnvironmentVariableA("PROTON_USE_WOW64", "1"); bool w1 = ProtonWow64();
+        SetEnvironmentVariableA("PROTON_USE_WOW64", "0"); bool w2 = ProtonWow64();
+        SetEnvironmentVariableA("PROTON_USE_WOW64", "10"); bool w3 = ProtonWow64();
+        SetEnvironmentVariableA("PROTON_USE_WOW64", NULL);
+        CHECK(!w0 && w1 && !w2 && !w3, "wine: PROTON_USE_WOW64 is on only when it is exactly 1 (%d %d %d %d)", w0, w1, w2, w3);
+        // A player's two runs of one install, the Complete Edition on Proton 11 (FINDINGS 8aw): the game's own video
+        // figure 3072 MB, render targets 1157 MB. Without WoW64: 103 MB of address space free at sizing in 16 blocks.
+        // The budget stays under the game's figure less the render targets (which is what held his world: 2,763 MB of
+        // video memory = 0.9 x 3072), the line names the figure and not Wine's cap, and it points to WoW64.
+        static uint64_t wFigV, wFigS, wFigSaved;
+        wFigV = wFigSaved = 3072ull << 20; wFigS = 31726ull << 20;
+        TSizeReset(1, 20134, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tRt0 = 1157ull << 20;
+        g_tAddrSpace.largest = 15ull << 20; g_tAddrSpace.total = 103ull << 20; g_tAddrSpace.blocks = 16;
+        g_fig = FigWatch{}; g_cs.figVideo = (uintptr_t)&wFigV; g_cs.figSystem = (uintptr_t)&wFigS; g_cs.figSaved = (uintptr_t)&wFigSaved;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == 1915 && TTabAll(1915) && g_brakeCfg.holdMb == 7 && g_brakeCfg.emergencyMb == 3 && !g_brakeCfg.raiseOn
+              && strstr(g_sizeNote, "the card allows 16449); the game's own video figure is 3072 MB: the budget stays under it less the render targets")
+              && !strstr(g_sizeNote, "capped at 2000 on Wine")
+              && strstr(g_sizeNote, "; address space 103 MB free in 16 blocks, the largest 15 MB (on Proton, PROTON_USE_WOW64=1 leaves the game far more)"),
+              "wine: his run without WoW64: budget %d under the game's 3072 MB figure, the layout and the pointer to WoW64: %s", g_sizedT, g_sizeNote);
+        // The same install with it: 2,438 MB free, the largest block 2048. Sized as Windows is, still under the game's
+        // figure, with the Windows lines and raises, and nothing to point to.
+        SetEnvironmentVariableA("PROTON_USE_WOW64", "1");
+        TSizeReset(1, 20003, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tRt0 = 1157ull << 20;
+        g_tAddrSpace.largest = 2048ull << 20; g_tAddrSpace.total = 2438ull << 20; g_tAddrSpace.blocks = 8;
+        g_fig = FigWatch{}; TSizeSettle(1000, 3000);
+        CHECK(g_sized && g_sizedT == 1915 && TTabAll(1915) && g_brakeCfg.holdMb == 512 && g_brakeCfg.raiseOn && g_brakeCfg.capMb == 1915
+              && strstr(g_sizeNote, "the card allows 16325); the game's own video figure is 3072 MB") && !strstr(g_sizeNote, "capped at 2000")
+              && strstr(g_sizeNote, "the largest 2048 MB") && !strstr(g_sizeNote, "PROTON_USE_WOW64"),
+              "wine: his run with WoW64: budget %d, the Windows lines, no pointer: %s", g_sizedT, g_sizeNote);
+        // A fragmented layout with WoW64 already on (a Deck, say): the cap as before, and nothing to point to.
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tWine = 1; g_cs.figVideo = g_cs.figSystem = g_cs.figSaved = 0; g_fig = FigWatch{};
+        g_tAddrSpace.largest = 269ull << 20; g_tAddrSpace.total = 1400ull << 20; g_tAddrSpace.blocks = 17;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sizedT == WINE_BUDGET_MAX_MB && strstr(g_sizeNote, "capped at 2000 on Wine (fragmented address space)") && !strstr(g_sizeNote, "PROTON_USE_WOW64"),
+              "wine: fragmented with WoW64 on: capped, no pointer: %s", g_sizeNote);
+        SetEnvironmentVariableA("PROTON_USE_WOW64", NULL);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); g_tWine = 1;
+        g_tAddrSpace.largest = 269ull << 20; g_tAddrSpace.total = 1400ull << 20; g_tAddrSpace.blocks = 17;
+        TSizeSettle(1000, 3000);
+        CHECK(g_sizedT == WINE_BUDGET_MAX_MB && strstr(g_sizeNote, "capped at 2000 on Wine (fragmented address space)")
+              && strstr(g_sizeNote, "the largest 269 MB (on Proton, PROTON_USE_WOW64=1 leaves the game far more)"),
+              "wine: fragmented without it: capped, and the pointer: %s", g_sizeNote);
+        // The Linux view (FINDINGS 8ay): on Wine the free address space is the unmapped gaps under 4 GB in the game's
+        // /proc/<pid>/maps. The gaps: between mappings and up to 4 GB; a 64-bit mapping above 4 GB counts for nothing;
+        // a map cut short counts no gap after its last line.
+        {
+            const char* mt = "00010000-00400000 r--p 00000000 00:00 0\n"
+                             "00400000-02000000 r-xp 00000000 08:01 11 /g/GTAIV.exe\n"
+                             "10000000-f0000000 ---p 00000000 00:00 0\n"
+                             "f0100000-f0200000 rw-s 00000000 00:05 9 /dev/dri/renderD128\n"
+                             "7f0000000000-7f0000100000 r--p 00000000 00:00 0\n";
+            AddrSpace g = MapsGaps(mt, strlen(mt), 0xFFFF0000ull, true);
+            CHECK(g.largest == 0x0FDF0000ull && g.total == 0x0E000000ull + 0x00100000ull + 0x0FDF0000ull && g.blocks == 3,
+                  "linux map: gaps between mappings and up to 4 GB, nothing above it (largest %llu, total %llu, %d)", g.largest, g.total, g.blocks);
+            size_t cut = strstr(mt, "7f00") - mt;
+            AddrSpace c = MapsGaps(mt, cut, 0xFFFF0000ull, false);
+            CHECK(c.largest == 0x0E000000ull && c.total == 0x0E100000ull && c.blocks == 2,
+                  "linux map: a map cut short counts no gap after its last line (largest %llu, total %llu)", c.largest, c.total);
+        }
+        {
+            char tmp[MAX_PATH]; GetTempPathA(MAX_PATH, tmp);
+            char root[MAX_PATH]; _snprintf_s(root, sizeof(root), _TRUNCATE, "%ssisco_proc_test", tmp);
+            auto put = [&](const char* rel, const char* data, size_t n) {
+                char p[MAX_PATH]; _snprintf_s(p, sizeof(p), _TRUNCATE, "%s\\%s", root, rel);
+                char d[MAX_PATH]; strcpy_s(d, p); *strrchr(d, '\\') = 0; CreateDirectoryA(root, NULL); CreateDirectoryA(d, NULL);
+                FILE* f = NULL; fopen_s(&f, p, "wb"); if (f) { fwrite(data, 1, n, f); fclose(f); }
+            };
+            const char self[] = "6a2f0000-6a2f1000 r--p 00000000 08:01 7 /home/p/GTAIV/plugins/SISCO.asi\n";
+            char m300[512];
+            _snprintf_s(m300, sizeof(m300), _TRUNCATE, "00010000-6a2f0000 ---p 00000000 00:00 0\n%s6a2f1000-c0000000 rw-p 00000000 00:00 0\n"
+                        "c8000000-ffff0000 ---p 00000000 00:00 0\n", self);
+            const char m200[] = "00010000-ffff0000 ---p 00000000 00:00 0\n";
+            put("100\\cmdline", "C:\\windows\\system32\\services.exe\0", 34);
+            put("200\\cmdline", "C:\\Program Files\\GTAIV\\GTAIV.exe\0-arg\0", 38); put("200\\maps", m200, strlen(m200));
+            put("300\\cmdline", "Z:\\games\\GTAIV\\GTAIV.exe\0", 25); put("300\\maps", m300, strlen(m300));
+            put("self\\cmdline", "GTAIV.exe\0", 10);
+            uintptr_t keepBase = g_selfBase; char keepName[sizeof(g_selfName)]; strcpy_s(keepName, g_selfName);
+            g_selfBase = 0x6A2F0000u; strcpy_s(g_selfName, "sisco.asi");
+            // Two games' command lines: the one whose map holds SISCO's own image is the game, whatever the order.
+            TSizeReset(1, 20134, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tProcRoot = root;
+            AddrSpace a = AddressSpace();
+            CHECK(g_asView == 1 && strstr(g_procMaps, "\\300\\maps") && a.largest == (128ull << 20) && a.total == (128ull << 20) && a.blocks == 1,
+                  "linux map: the game's pid is the one whose map holds SISCO (%s): largest %llu MB", g_procMaps, a.largest >> 20);
+            // Sized from it: Wine's cap, the lines from the block with the Linux floors (hold 96, emergency 48 where half
+            // and a quarter of 128 would be 64 and 32), the size line names the map and points to WoW64.
+            TSizeSettle(1000, 3000);
+            CHECK(g_sizedT == WINE_BUDGET_MAX_MB && g_brakeCfg.holdMb == 96 && g_brakeCfg.emergencyMb == 48 && !g_brakeCfg.raiseOn
+                  && strstr(g_sizeNote, "; address space (Linux map) 128 MB free in 1 blocks, the largest 128 MB (on Proton, PROTON_USE_WOW64=1 leaves the game far more)"),
+                  "linux map: sized from it, the lines floored at 96 and 48: %s", g_sizeNote);
+            // The brake reads it every tick: the driver maps 48 MB more, the gap is 80 MB, under the hold.
+            const char* gapAt = strstr(m300, "c8000000"); char m300b[512]; strcpy_s(m300b, m300); memcpy(m300b + (gapAt - m300), "c5000000", 8);
+            put("300\\maps", m300b, strlen(m300b));
+            int64_t lNow = (int64_t)(LargestFreeBlock() >> 20);
+            BrakeCfg lc = g_brakeCfg; BrakeState lst = { 2000, false, -1, 0 }; int la = -1;
+            int lt = BrakeDecide(lst, 1000, 2500, 797, lNow, lc, &la);
+            CHECK(lNow == 80 && la == BRAKE_HOLD && lt < 2000, "linux map: the brake sees the driver's mappings: 80 MB, a hold (%lld, act %d, budget %d)", lNow, la, lt);
+            // A lone GTAIV.exe whose map does not show SISCO (an image Wine copied): it stands.
+            put("300\\cmdline", "C:\\windows\\explorer.exe\0", 24);
+            TSizeReset(1, 20134, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tProcRoot = root;
+            a = AddressSpace();
+            CHECK(g_asView == 1 && strstr(g_procMaps, "\\200\\maps") && a.largest == 0, "linux map: a lone game stands without the confirming line (%s)", g_procMaps);
+            // Two games and neither map shows SISCO: no guess; the Windows view, and the size line says so.
+            put("300\\cmdline", "Z:\\games\\GTAIV\\GTAIV.exe\0", 25); put("300\\maps", m200, strlen(m200));
+            TSizeReset(1, 20134, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tProcRoot = root;
+            TSizeSettle(1000, 3000);
+            CHECK(g_asView == -1 && !g_procMaps[0] && strstr(g_sizeNote, "; address space (Windows' view: the Linux map not found) "),
+                  "linux map: two games and no confirming line: not guessed, the Windows view, said: %s", g_sizeNote);
+            // Wine's 64-bit WoW64 mode (a mapping above 4 GB): Wine holds the low 4 GB for the game there, so its gaps are
+            // not the game's room. Windows' view, said on the size line, and no pointer to the mode it is already in.
+            char m64[640]; _snprintf_s(m64, sizeof(m64), _TRUNCATE, "%s7f0000000000-7f0000100000 r--p 00000000 00:00 0\n", m300);
+            put("300\\maps", m64, strlen(m64));
+            bool hi = false; MapsGaps(m64, strlen(m64), 0xFFFF0000ull, true, &hi);
+            TSizeReset(1, 20134, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tProcRoot = root;
+            TSizeSettle(1000, 3000);
+            CHECK(hi && g_asView == -2 && strstr(g_sizeNote, "; address space (Windows' view: Wine's 64-bit WoW64 mode) ") && !strstr(g_sizeNote, "PROTON_USE_WOW64=1 leaves"),
+                  "linux map: Wine's 64-bit mode is seen in the map, and Windows' view stands there: %s", g_sizeNote);
+            // No /proc at all (drive Z: not mapped): the same.
+            TSizeReset(1, 20134, CAR_STOCK, PED_STOCK); g_tWine = 1; g_tProcRoot = "Q:\\no\\such\\proc";
+            AddressSpace();
+            CHECK(g_asView == -1, "linux map: no /proc to read: the Windows view (%d)", g_asView);
+            g_selfBase = keepBase; strcpy_s(g_selfName, keepName);
+            const char* rels[] = { "100\\cmdline", "200\\cmdline", "200\\maps", "300\\cmdline", "300\\maps", "self\\cmdline" };
+            for (const char* r : rels) { char p[MAX_PATH]; _snprintf_s(p, sizeof(p), _TRUNCATE, "%s\\%s", root, r); DeleteFileA(p); }
+            const char* dirs[] = { "100", "200", "300", "self" };
+            for (const char* d : dirs) { char p[MAX_PATH]; _snprintf_s(p, sizeof(p), _TRUNCATE, "%s\\%s", root, d); RemoveDirectoryA(p); }
+            RemoveDirectoryA(root);
+            TSizeReset(1, 20134, CAR_STOCK, PED_STOCK);
+        }
+        g_tRt0 = 799ull << 20;
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
         CHECK(g_sized && g_sizedT == 4000 && g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 192 && !strstr(g_sizeNote, "address space") && !strstr(g_sizeNote, "on Wine")
-              && strstr(g_sizeNote, "; pool managed (read back from the game)"),
+              && strstr(g_sizeNote, "; pool managed;"),
               "wine: on Windows nothing of this applies: 4000, the measured lines, no layout on the line, and the pool named managed: %s", g_sizeNote);
         // The settle boundary itself: not one tick early, sized exactly at SETTLE_TICKS steady ticks.
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
@@ -1468,7 +2458,7 @@ static void CoreTests() {
         SiteSet(S_VSTRUCT, ST_OFF_MISMATCH, "site bytes differ");
         TSizeSettle(1000, 3000);
         CHECK(g_sized && g_sizedT == T_MAX_MB && g_tVeh == CAR_NO_POOL && g_tPed == PED_FULL
-              && strstr(g_sizeNote, "VehicleStruct pool can use it"),
+              && strstr(g_sizeNote, "(car held at 120 MB: VehicleStruct pool not raised)"),
               "world: the VehicleStruct raise was refused: car held at %u MB, ped still %u MB", g_tVeh / 1000000, g_tPed / 1000000);
         SiteSet(S_VSTRUCT, ST_ON, "");
 
@@ -1478,14 +2468,14 @@ static void CoreTests() {
         TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
         g_playerVidmemMb = 2048;
         TSizeSettle(1000, 3000);
-        CHECK(g_sized && g_sizedT < 2048 && g_sizedT > TStockFloor(2) && strstr(g_sizeNote, "your own -availablevidmem"),
+        CHECK(g_sized && g_sizedT < 2048 && g_sizedT > TStockFloor(2) && strstr(g_sizeNote, "your -availablevidmem"),
               "world: a 24 GB card with the player's own -availablevidmem 2048: budget %d MB", g_sizedT);
 
         // A figure larger than the card changes nothing, because the card is still the smaller of the two.
         TSizeReset(1, 3895, CAR_STOCK, PED_STOCK);
         g_playerVidmemMb = 8192;
         TSizeSettle(1000, 3000);
-        CHECK(g_sized && !strstr(g_sizeNote, "your own -availablevidmem"),
+        CHECK(g_sized && !strstr(g_sizeNote, "your -availablevidmem"),
               "world: an -availablevidmem above the card's own figure is not a bound: %d MB", g_sizedT);
 
         TSizeReset(1, 3895, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
@@ -1597,21 +2587,49 @@ static void CoreTests() {
         CHECK(InstallD3DHook(dc) && g_tIatSlot[0] == (uint32_t)(uintptr_t)HkDirect3DCreate9 && g_oD3DCreate9 == MockDirect3DCreate9,
               "CE Direct3D: hooked in its import slot with no thunk to check: %s", g_site[S_D3D_IAT].note);
 
-        // The Complete Edition works out a video-memory figure of its own, measured far larger than anything SISCO would
-        // write, so writing ours could only lower it. It is set on 1.0.8.0 only.
+        // The Complete Edition is given a video-memory figure too, since 1.0.5: the one FusionFix's substitute gives
+        // where the game's own answer is right (the card's budget, at most half the RAM, never under 2048 MB), so
+        // nothing moves there, and a game that answered 2048 MB on a 16 GB card (a player's log, FINDINGS 8av) is
+        // told what the card has. Until then it was left to the game.
         CoreSites keepCs = g_cs;
         int keepDxvk = g_dxvk, keepState = g_dxgiState; int64_t keepBoot = g_bootBudgetMb; LONG keepCalls = g_d3dCalls;
         char keepNote[sizeof(g_d3dNote)]; memcpy(keepNote, g_d3dNote, sizeof(keepNote));
         uint32_t keepPrm[3] = { g_tPrm[0], g_tPrm[1], g_tPrm[2] };
+        uint64_t keepRam = g_tTotalRam;
         g_cs = dc;
-        g_d3dCalls = 0; g_dxvk = -1; g_bootBudgetMb = 23370; g_dxgiState = -1;
+        g_d3dCalls = 0; g_dxvk = -1; g_bootBudgetMb = 23370; g_dxgiState = -1; g_tTotalRam = 32420ull << 20;
         g_tPrm[0] = g_tPrm[1] = g_tPrm[2] = 0; g_tD3D.dxvk = 1; g_tD3D.refs = 1;
         static uint8_t ceImg[96]; memset(ceImg, 0xAB, sizeof(ceImg)); ceImg[19] = 0; memcpy(ceImg + 20, "v3.1.1", 7);   // not the test binary's own .rdata
         g_tDxvkImage = ceImg; g_tDxvkImageN = sizeof(ceImg);
         ((D3DCreate9_t)(uintptr_t)g_tIatSlot[0])(32);
+        CHECK(g_tPrm[2] == (uint32_t)(uintptr_t)g_vidmemArg && !strcmp(g_vidmemArg, "16210") && g_vidmemSetMb == 16210
+              && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && strstr(g_d3dNote, "-availablevidmem 16210 set") && !strstr(g_d3dNote, "left to the game"),
+              "CE Direct3D: -managed set, -availablevidmem = the card's budget, at most half the RAM (24 GB card, 32 GB RAM: %s): %s", g_vidmemArg, g_d3dNote);
+        g_d3dCalls = 0; g_dxvk = -1; g_bootBudgetMb = 15209; g_tTotalRam = 63092ull << 20; g_tPrm[1] = g_tPrm[2] = 0;
+        ((D3DCreate9_t)(uintptr_t)g_tIatSlot[0])(32);
+        CHECK(g_tPrm[2] == (uint32_t)(uintptr_t)g_vidmemArg && !strcmp(g_vidmemArg, "15209") && g_vidmemSetMb == 15209,
+              "CE Direct3D: the player's install (16 GB card, 64 GB RAM): the game is told %s MiB", g_vidmemArg);
+        g_d3dCalls = 0; g_dxvk = -1; g_tPrm[1] = 0; g_tPrm[2] = 0x5678;
+        ((D3DCreate9_t)(uintptr_t)g_tIatSlot[0])(32);
+        CHECK(g_tPrm[2] == 0x5678 && g_vidmemSetMb == 0 && strstr(g_d3dNote, "the player's -availablevidmem kept"),
+              "CE Direct3D: the player's own -availablevidmem stands there too: %s", g_d3dNote);
+        g_d3dCalls = 0; g_dxvk = -1; g_bootBudgetMb = 300; g_tPrm[1] = g_tPrm[2] = 0;
+        ((D3DCreate9_t)(uintptr_t)g_tIatSlot[0])(32);
+        CHECK(g_tPrm[2] == 0 && g_vidmemSetMb == 0 && strstr(g_d3dNote, "-availablevidmem NOT set (no budget from DXGI)"),
+              "CE Direct3D: no budget from DXGI: nothing written: %s", g_d3dNote);
+        // On Wine the Complete Edition's own answer stands (3072 MB in a player's Proton logs, FINDINGS 8aw): the
+        // address space is what runs short there, and no Wine run has measured the world past that figure.
+        int keepWine = g_tWine;
+        g_d3dCalls = 0; g_dxvk = -1; g_bootBudgetMb = 20855; g_tPrm[1] = g_tPrm[2] = 0; g_tWine = 1; g_wineNote[0] = 0;
+        ((D3DCreate9_t)(uintptr_t)g_tIatSlot[0])(32);
+        CHECK(g_tPrm[2] == 0 && g_vidmemSetMb == 0 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && strstr(g_d3dNote, "-availablevidmem left to the game on Wine"),
+              "CE Direct3D: on Wine -managed is set and the video figure is left to the game: %s", g_d3dNote);
+        g_tWine = keepWine; g_wineNote[0] = 0;
         g_tDxvkImage = NULL; g_tDxvkImageN = 0;
-        CHECK(g_tPrm[2] == 0 && g_tPrm[1] == (uint32_t)(uintptr_t)g_flagArg && strstr(g_d3dNote, "left to the Complete Edition"),
-              "CE Direct3D: -managed set, -availablevidmem left to the game's own figure: %s", g_d3dNote);
+        CHECK(CeVidmemMb(15209, 63092ull << 20) == 15209 && CeVidmemMb(23370, 32420ull << 20) == 16210 && CeVidmemMb(1700, 16384ull << 20) == 2048
+              && CeVidmemMb(3400, 8192ull << 20) == 3400 && CeVidmemMb(23370, 0) == 23370,
+              "CE Direct3D: the figure's rule: the budget, at most half the RAM, never under 2048, the budget alone when the RAM is not known");
+        g_tTotalRam = keepRam; g_vidmemSetMb = 0;
         // Everything this case touched goes back: the cases after it read the Direct3D state this one overwrote.
         g_cs = keepCs; g_dxvk = keepDxvk; g_dxgiState = keepState; g_bootBudgetMb = keepBoot; g_d3dCalls = keepCalls;
         memcpy(g_d3dNote, keepNote, sizeof(g_d3dNote));
@@ -1632,8 +2650,14 @@ static void CoreTests() {
         CHECK(!n[0], "wine: no layout note on Windows");
         g_tWine = 1; AddrSpaceNote(n, sizeof(n)); g_tWine = 0;
         CHECK(strstr(n, "; address space ") && strstr(n, "the largest"), "wine: and one on Wine: %s", n);
-        g_brakeCfg.holdMb = BRAKE_HOLD_MB; g_brakeCfg.emergencyMb = BRAKE_EMERGENCY_MB; BrakeWineLines(2000);
-        CHECK(g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 192, "wine: a large block at sizing leaves the Windows lines, 512 and 192 as BRAKEN2 ran them");
+        g_brakeCfg.holdMb = BRAKE_HOLD_MB; g_brakeCfg.emergencyMb = BRAKE_EMERGENCY_MB; g_brakeCfg.raiseOn = 1; BrakeWineLines(2000);
+        CHECK(g_brakeCfg.holdMb == 512 && g_brakeCfg.emergencyMb == 192 && g_brakeCfg.raiseOn,
+              "wine: a large block at sizing leaves the Windows lines, 512 and 192 as BRAKEN2 ran them, and the raises");
+        BrakeWineLines(269);
+        CHECK(g_brakeCfg.holdMb == 134 && g_brakeCfg.emergencyMb == 67 && !g_brakeCfg.raiseOn, "wine: the Deck's 269 MB lowers the lines and turns the raises off");
+        g_brakeCfg.holdMb = BRAKE_HOLD_MB; g_brakeCfg.emergencyMb = BRAKE_EMERGENCY_MB; g_brakeCfg.raiseOn = 1; BrakeWineLines(900);
+        CHECK(g_brakeCfg.holdMb == 450 && g_brakeCfg.emergencyMb == 192 && !g_brakeCfg.raiseOn, "wine: 900 MB lowers only the hold line, and that alone turns the raises off");
+        g_brakeCfg.holdMb = BRAKE_HOLD_MB; g_brakeCfg.emergencyMb = BRAKE_EMERGENCY_MB; g_brakeCfg.raiseOn = 1;
         BrakeWineLines(0);
         CHECK(g_brakeCfg.holdMb == 512, "wine: no block measured leaves them too");
     }
@@ -1743,8 +2767,8 @@ static void CoreTests() {
         // The proof on the log, from the count the game resolved, and the peak.
         mCount = 48; mSummed = 117; g_enginePlan = ep;
         char an[400]; CoreSites keepCs = g_cs; CoreSites ac = ec; AudioNote(ac, an, sizeof(an));
-        CHECK(strstr(an, "48 engine sound slots of the 48 SISCO declared (the game's own file 15), limit 48; the loader read 117 slots (SISCO's file has 117), audio heap 152 MiB set")
-              && !strstr(an, ": the"), "engine: the audio line: %s", an);
+        CHECK(strstr(an, "48 engine sound slots in use (the game's own file 15), audio heap 152 MiB") && !strstr(an, "declared")
+              && !strstr(an, ": the"), "engine: the audio line, everything as SISCO set it: the short form: %s", an);
         mCount = 21; mSummed = 91; AudioNote(ac, an, sizeof(an));
         CHECK(strstr(an, "the loader read 91 slots") && strstr(an, "the game read another slot file than waveslots_sisco.xml"), "engine: another file read is named as such: %s", an);
         uint8_t keepRd = mReader[0]; mReader[0] = 0xE9; AudioNote(ac, an, sizeof(an)); mReader[0] = keepRd;
@@ -1753,12 +2777,22 @@ static void CoreTests() {
         CHECK(strstr(an, "found fewer engine slots in it"), "engine: the right file with too few slots is named as such: %s", an);
         mSummed = 0;
         mCount = 48; g_cs.audioSlots = (uintptr_t)&mCount; g_enginePeak = 0; memset(g_engineTable, 0, sizeof(g_engineTable));
+        g_enginePeakLogged = 0; g_enginePeakMs = -ENGINE_PEAK_GAP_MS;
         for (int i = 0; i < 15; i++) *(uint32_t*)(g_engineTable + 16 * i + 8) = 1;
-        EngineSlotTick();
-        CHECK(g_enginePeak == 15, "engine: 15 held: the peak, not over the game's own (%d)", g_enginePeak);
+        EngineSlotTick(1000);
+        CHECK(g_enginePeak == 15 && g_enginePeakLogged == 0, "engine: 15 held: the peak, not over the game's own, no line (%d)", g_enginePeak);
         for (int i = 15; i < 22; i++) *(uint32_t*)(g_engineTable + 16 * i + 8) = 2;
-        EngineSlotTick();
-        CHECK(g_enginePeak == 22, "engine: 22 held: a new peak over the game's 15 (%d)", g_enginePeak);
+        EngineSlotTick(2000);
+        CHECK(g_enginePeak == 22 && g_enginePeakLogged == 22, "engine: 22 held: a new peak over the game's 15, on the log at once (%d)", g_enginePeak);
+        for (int i = 22; i < 25; i++) *(uint32_t*)(g_engineTable + 16 * i + 8) = 3;
+        EngineSlotTick(3000);
+        for (int i = 22; i < 25; i++) *(uint32_t*)(g_engineTable + 16 * i + 8) = 0;
+        EngineSlotTick(30000);
+        CHECK(g_enginePeak == 25 && g_enginePeakLogged == 22, "engine: 25 a second later: the peak kept, no line inside the minute (%d)", g_enginePeakLogged);
+        EngineSlotTick(62000);
+        CHECK(g_enginePeakLogged == 25, "engine: the minute over, the peak on the log though it has passed (%d)", g_enginePeakLogged);
+        EngineSlotTick(200000);
+        CHECK(g_enginePeakLogged == 25 && g_enginePeakMs == 62000, "engine: no new peak, no line");
         g_cs = keepCs; memset(g_engineTable, 0, sizeof(g_engineTable)); g_engineOn = false; g_enginePeak = 0;
         // The Complete Edition's reader pushes the pointer: push [ptr] becomes push imm32 and a NOP.
         { CoreSites cc = ec; cc.waveReadPush = 1; uint8_t a[6], b2[6]; WaveReaderBytes(cc, false, a); WaveReaderBytes(cc, true, b2);
@@ -1869,15 +2903,15 @@ static void CoreTests() {
         uint8_t keepCap[3], keepHeap[5]; memcpy(keepCap, capIns, 3); memcpy(keepHeap, heapIns, 5);
         char t[200]; AudioNote(c, t, sizeof(t));
         CHECK(!memcmp(keepCap, capIns, 3) && !memcmp(keepHeap, heapIns, 5), "audio: nothing was written back");
-        CHECK(strstr(t, "15 engine sound slots") && strstr(t, "limit 25") && strstr(t, "126 MiB") && strstr(t, "no engine sound"),
-              "audio: stock is read as 15 of 25 and what it costs is said: %s", t);
+        CHECK(strstr(t, "15 engine sound slots") && strstr(t, "limit 25") && strstr(t, "126 MiB") && !strstr(t, "another mod"),
+              "audio: stock is read as 15 of 25: %s", t);
         capIns[2] = 50; slotCount = 50; heap = 160u << 20; memcpy(heapIns + 1, &heap, 4);
         AudioNote(c, t, sizeof(t));
         CHECK(strstr(t, "50 engine sound slots") && strstr(t, "another mod has changed them") && !strstr(t, "no engine sound"),
               "audio: an install another mod changed is named as one: %s", t);
         capIns[1] = 0xFF;                       // the Complete Edition's register, on 1.0.8.0's table
         AudioNote(c, t, sizeof(t));
-        CHECK(strstr(t, "not where SISCO reads them"), "audio: the other build's loop is refused, no figure invented: %s", t);
+        CHECK(strstr(t, "not found where SISCO reads them"), "audio: the other build's loop is refused, no figure invented: %s", t);
         SitesShapeCe(c);
         AudioNote(c, t, sizeof(t));
         CHECK(strstr(t, "50 engine sound slots"), "audio: the Complete Edition's own register is read: %s", t);

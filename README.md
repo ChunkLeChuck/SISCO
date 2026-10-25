@@ -8,7 +8,8 @@ GTA IV is notorious for its texture streaming problems. Those of us who have bee
 
 SISCO raises the limits to better accommodate bigger mod installs, and fixes the things that break when you do.
 
-It supports **1.0.8.0** and the **Complete Edition (1.2.0.59)**, and it requires **DXVK 3.x**, which is in the
+It supports **1.0.8.0** and the **Complete Edition 1.2.0.59**, those two versions only (an older Complete Edition
+such as 1.2.0.43 is not supported; the log says so and nothing is changed), and it requires **DXVK 3.x**, which is in the
 download. The game's own Direct3D 9 renderer is not supported. 
 
 ## Installing
@@ -17,7 +18,7 @@ Put `SISCO.asi` and `SISCO.ini` in your `plugins` folder, and `vulkan.dll` in th
 replacing the one FusionFix put there. If you run FusionFix you already have an ASI loader.
 
 `vulkan.dll` is DXVK 3.1.1, unmodified, under the file name FusionFix's D3D9 proxy loads DXVK by. It is the
-version SISCO is tested against; an older DXVK is not refused, and the log records the version and file it found.
+version SISCO is tested against; an older DXVK is not refused, and the log records the version it found.
 FusionFix's `d3d9.cfg` in the game folder must say `API = 1` under `[MAIN]`, which it already does if the game was
 running DXVK before. If you run DXVK as your own `d3d9.dll` instead of through FusionFix, rename the `vulkan.dll`
 from the download to `d3d9.dll` and use it in place of yours; it is the same file.
@@ -27,7 +28,8 @@ newer DXVK and can stay. SISCO never edits a game file: apart from that one file
 only while SISCO is in, every change it makes lives in memory for that one run.
 
 It writes `plugins\SISCO.log`: a short, plain record of what it changed and what it decided. That file is the first
-thing to look at if something seems wrong, and the thing to attach to a bug report.
+thing to look at if something seems wrong, and the thing to attach to a bug report. The session before is kept beside
+it as `SISCO.prev.log`, so after a crash the crashed session's log is still there even if the game was started again.
 
 ## If something goes wrong
 
@@ -56,9 +58,16 @@ SISCO does not make most presents at all: one goes through every 33 ms on a load
 the world builds, so the screen still moves, and nothing that waits inside a present can hold the load. The same
 install then loaded in 10 seconds with VSync on and 17 under the 30 fps cap, with the raised budget. That was
 measured with VSync and with DXVK's own limiter; RTSS and the driver's limiter wait inside the same present, so they
-should be covered as well, but no run has tested them. The log's `loading` line says when each loading screen went up,
-the `world` line how long it was up before the player appeared, the `present` line how many presents were not made,
-and the `load` line how long the world took to build after that.
+should be covered as well, but no run has tested them. The log's `load` lines say when each loading screen went up
+and, once the world is built, how long the loading screen was up, how long the world took to build after the player
+appeared, and how many presents were not made.
+
+Loads without a loading screen (a taxi skip, a mission start) are covered the same way: once the game draws under 16
+frames a second and presents the same screen at least 8 times a frame, one present goes through every 33 ms, until
+the frames come back (within half a second). A taxi skip that took 15 to 20 seconds this way takes about 2. SISCO
+tells those screens by the game's frame counter, which newer FusionFix builds hook; it reads it either way, and leaves
+such loads alone while the counter stands still. Menus are never held: while a menu is open every present
+goes out, so the main menu runs at its full frame rate even though the game shows it as part of a loading screen.
 
 ## What it changes
 
@@ -119,7 +128,26 @@ These are bugs in the game, not in the mod. They are out of reach at the stock l
 GTA IV is 32-bit, so there is a hard ceiling on address space that no graphics card can raise. Once a second SISCO
 looks at how much room is left, and if it is running out it eases the budget back down a step at a time, taking it
 from the world first; the car and ped budgets only follow once the world budget has fallen below 2000 MB. Measured:
-the city thins slightly instead of the game falling over.
+the city thins slightly instead of the game falling over. When the free space drops fast (96 MB or more within one
+second, as when a mission starts on a heavy install), it does not wait for its next step: it lowers the budget two
+steps on that second.
+
+A budget level that has held for 5 minutes with no address space lost, and that the world is filling when they end,
+becomes the ceiling. When a burst forces the budget under it (a taxi skip, a mission start), the budget climbs back
+one step at a time, each after 5 quiet minutes, and the car and ped budgets come back with it. After a climb, a slow,
+steady loss, a fast one while the world grows into the climb, or an emergency lowers the ceiling for good instead.
+Time in menus and on loading screens does not count toward any of these minutes. Not with FusionFix's
+ExtraStreamingMemory, and not on Wine layouts where the brake starts lower.
+
+If Direct3D ever fails to create a texture for want of memory, the game lowers its own figures for how much memory it
+has and holds the world smaller until the display device resets (a VSync or resolution change). SISCO logs it (the
+`memory` line), lowers its budget to match so its next step still makes the world smaller, and never raises past that
+level again, even when the game puts its figures back first. In play it never changes the game's figures itself.
+
+The game never keeps more loaded than the video memory it believes the card has, whatever the budget says. So when
+the game starts, SISCO tells it what the card has, through the `-availablevidmem` launch option (your own value
+stands if you set one), and it never sizes the budget, or the car and ped budgets, past the figure the game ends up
+with. If the game did not take SISCO's figure, the log's `memory` and `size` lines say so.
 
 ## Alongside other mods
 
@@ -134,6 +162,13 @@ the city thins slightly instead of the game falling over.
   reads like Windows is sized as Windows is. Either way the brake follows the layout it measures at sizing, and the
   `size` and `brake` lines record it. Presents are skipped during loads there as on Windows, so the Deck's own frame
   limit should not slow loading either; that has not been measured on a Deck yet.
+  **Set `PROTON_USE_WOW64=1`** (Proton 10 or newer; in Steam's launch options: `PROTON_USE_WOW64=1 %command%`). One
+  player's install had 103 MB of address space free when the world loaded without it and 2,438 MB with it; without it
+  the brake had taken the budget down to the game's own within seven minutes. The log's `size` line points to it
+  when the layout is that tight and it is not set. Without it, the graphics driver's mappings of video memory share
+  the game's address space, and Windows' view of memory cannot see them; SISCO reads the free space from the game's
+  Linux memory map instead (through drive Z:, which Proton maps to the Linux root), so the brake still acts in time. On Linux the Complete Edition keeps its own video-memory figure
+  (3072 MB in that player's logs), and the budget is sized under it.
 - **revd and other engine-sound slot fixes**: SISCO does the same job, so you do not need them. If one is installed,
   SISCO sees that it already changed the slots and leaves them to it; the log's `audio` line says so. SISCO never
   edits the game's `waveslots.xml`: it writes its own `pc\audio\config\waveslots_sisco.xml` at start, built from
@@ -178,6 +213,7 @@ core/sis_core_tests.h  its tests, compiled into the release's own build
 SIS/SIS.cpp            DllMain, the log, the once-a-second worker
 SIS/sis_test.cpp       the test runner
 SIS/sis_load.cpp       loads the built .asi outside the game and checks it changes nothing
+SIS/sis_build.cpp      maps real GTAIV.exe files and checks which ones the mod accepts as the game
 tools/                 the site checker, the instrument check, and a small PE reader they share
 docs/                  how each address was found, and what was measured
 ```

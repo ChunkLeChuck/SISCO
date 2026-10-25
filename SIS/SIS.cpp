@@ -28,6 +28,26 @@ static bool OpenLog(const char* path) {
     g_log = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
     return g_log != INVALID_HANDLE_VALUE;
 }
+// The last session's log is kept as <name>.prev.log before this one starts: a player whose game crashed and who started
+// it again before sending the log still has the crash's (a report of the game's own RESC10, 2026-09-26). One generation,
+// replaced each start. A log still held open by a game that is closing stays where it is, and this run's open fails as
+// it always has. False when there was nothing to keep or it could not be moved.
+static bool KeepPrevLog(const char* path) {
+    size_t n = strlen(path);
+    if (n < 4 || _stricmp(path + n - 4, ".log") || n + 5 >= MAX_PATH) return false;
+    char prev[MAX_PATH]; _snprintf_s(prev, sizeof(prev), _TRUNCATE, "%.*s.prev.log", (int)(n - 4), path);
+    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) return false;
+    return MoveFileExA(path, prev, MOVEFILE_REPLACE_EXISTING) != 0;
+}
+// The log for this start. In the game (and in the harness): the last one kept first, then this one opened. In any other
+// process that loads the plugin (a launcher with an ASI loader, the second audit's rest-6) nothing is moved: its note
+// goes on the end of the log that is there, which would otherwise be pushed out before the game's next start could keep
+// it, the crashed session's with it.
+static bool StartLog(const char* path, bool game) {
+    if (game) { KeepPrevLog(path); return OpenLog(path); }
+    g_log = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+    return g_log != INVALID_HANDLE_VALUE;
+}
 // A site's line for the log: what it did, or why it is off.
 static const char* SiteText(int s, char* buf, size_t cap) {
     if (g_site[s].state == ST_ON) _snprintf_s(buf, cap, _TRUNCATE, "%s", g_site[s].note);
@@ -59,8 +79,16 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     char path[MAX_PATH] = "";
     DWORD pathN = GetModuleFileNameA(h, path, MAX_PATH);
     if (!pathN || pathN >= MAX_PATH - 4) return TRUE;         // no room to turn it into a .log name: nothing to write to
+    {   // SISCO's own image and file name: on Wine they pick the game's Linux memory map out of /proc (AddressSpace)
+        g_selfBase = (uintptr_t)h;
+        const char* base = strrchr(path, '\\'); base = base ? base + 1 : path;
+        size_t k = 0; for (; base[k] && k < sizeof(g_selfName) - 1; k++) g_selfName[k] = (char)tolower((unsigned char)base[k]);
+        g_selfName[k] = 0;
+    }
     char* dot = strrchr(path, '.'); if (dot) strcpy_s(dot, MAX_PATH - (dot - path), ".log");
-    OpenLog(path);
+    char why[160] = "";
+    bool known = IsKnownBuild(why, sizeof(why));                 // first: only the game itself moves the last log aside
+    StartLog(path, known);
     {   // 1.0.1 and 1.0.2 wrote SISCO-SLOW-LOAD.txt beside the log after a slow load; its advice is obsolete, so it goes
         char old[MAX_PATH];
         if (_snprintf_s(old, sizeof(old), _TRUNCATE, "%.*s-SLOW-LOAD.txt", (int)(dot ? dot - path : (ptrdiff_t)strlen(path)), path) > 0) DeleteFileA(old);
@@ -71,28 +99,25 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     char* ext = strrchr(ini, '.'); if (ext) strcpy_s(ext, MAX_PATH - (ext - ini), ".ini");
     bool haveIni = GetFileAttributesA(ini) != INVALID_FILE_ATTRIBUTES;
     g_set = ReadSettings(ini);
-    SisLog("sis", "SISCO %s (build %s), the Streaming Issue Solver: Crash Override, for GTA IV 1.0.8.0 and the Complete Edition",
-           SIS_VERSION, SISCO_BUILD);
-    char why[160] = "";
-    if (!IsKnownBuild(why, sizeof(why))) {
-        SisLog("sis", "this is neither GTA IV 1.0.8.0 nor the Complete Edition (%s): SISCO changes nothing", why);
+    // The log is read in bug reports: facts and figures, short, one line per thing (the owner, 2026-09-28).
+    if (!known) {
+        // The versions by number: an older Complete Edition (1.2.0.43, a player's, 2026-10-02) is a Complete Edition too,
+        // and "not the Complete Edition" read to him as a fault.
+        SisLog("sis", "SISCO %s (build %s): not GTA IV 1.0.8.0 or 1.2.0.59, the two versions SISCO supports (%s), nothing changed", SIS_VERSION, SISCO_BUILD, why);
         if (g_log != INVALID_HANDLE_VALUE) { CloseHandle(g_log); g_log = INVALID_HANDLE_VALUE; }
         return TRUE;
     }
-    SisLog("sis", "the game is %s", g_buildName);
+    SisLog("sis", "SISCO %s (build %s), GTA IV %s%s", SIS_VERSION, SISCO_BUILD, g_buildName, g_buildHdr);
     // Always logged, on or off, so a bug report can never hide a setting and nobody has to be asked for one.
     char sw[140] = "";
     if (!g_set.enabled) strcpy_s(sw, "everything OFF (Enabled=0)");
     else if (g_set.fixes && g_set.limits && g_set.budget) strcpy_s(sw, "everything on");
-    else _snprintf_s(sw, sizeof(sw), _TRUNCATE, "OFF: %s%s%s", g_set.fixes ? "" : "Fixes ",
-                     g_set.limits ? "" : "Limits ", g_set.budget ? "" : "Budget ");
-    SisLog("settings", "%s (%s)", sw, haveIni ? "SISCO.ini" : "no SISCO.ini, so the defaults");
-    if (IsWine()) SisLog("platform", "%s: Proton on the Steam Deck reads like this; where the largest free block is under %d MB at sizing the budget is asked for up to %d MB, the brake follows the memory layout, and the size and brake lines record it",
-                         g_wineNote, WINE_ROOMY_MB, WINE_BUDGET_MAX_MB);
-    if (!g_set.enabled) {
-        SisLog("sis", "SISCO changes nothing this run. Set Enabled=1 in SISCO.ini to turn it back on.");
-        return TRUE;
-    }
+    else _snprintf_s(sw, sizeof(sw), _TRUNCATE, "OFF:%s%s%s", g_set.fixes ? "" : " Fixes",
+                     g_set.limits ? "" : " Limits", g_set.budget ? "" : " Budget");
+    SisLog("settings", "%s (%s)%s", sw, haveIni ? "SISCO.ini" : "no SISCO.ini: the defaults", g_set.enabled ? "" : ", nothing changed");
+    if (IsWine()) SisLog("platform", "%s%s: budget capped at %d MB where the largest free block is under %d MB at sizing",
+                         g_wineNote, ProtonWow64() ? ", PROTON_USE_WOW64=1" : "", WINE_BUDGET_MAX_MB, WINE_ROOMY_MB);
+    if (!g_set.enabled) return TRUE;
     // The engine-sound slots are declared in a file SISCO writes, pc\audio\config\waveslots_sisco.xml; the table is only
     // moved once that file is on disk, so it is prepared here, before the install.
     if (g_set.limits) {
@@ -102,17 +127,18 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     }
     SisLoadResult r = SisInstall(GameCoreSites());
     char a[128], b[128], c[128], d[128];
-    if (!g_set.fixes) SisLog("fixes", "off (Fixes=0 in SISCO.ini)");
-    else SisLog("fixes", "release queue %s; link-pool lock %s; startup race %s", r.queue ? "ON" : "OFF", r.lock ? "ON" : "OFF", r.race ? "ON" : "OFF");
-    if (!g_set.limits) SisLog("limits", "off (Limits=0 in SISCO.ini)");
+    if (!g_set.fixes) SisLog("fixes", "off (Fixes=0)");
+    else if (r.queue && r.lock && r.race) SisLog("fixes", "all on");
+    else SisLog("fixes", "release queue %s; link-pool lock %s; startup race %s", r.queue ? "on" : "OFF", r.lock ? "on" : "OFF", r.race ? "on" : "OFF");
+    if (!g_set.limits) SisLog("limits", "off (Limits=0)");
     else {
         SisLog("limits", "VehicleStruct %s; drawable slots %s; links %s; arena in KB %s",
                SiteText(S_VSTRUCT, a, sizeof(a)), SiteText(S_SLOT_SIZE, b, sizeof(b)), SiteText(S_LINK_SIZE, c, sizeof(c)),
                SiteText(S_ARENA_SIZE, d, sizeof(d)));
-        SisLog("audio", "engine sound slots %s%s%s", SiteText(S_ENGINE, a, sizeof(a)),
-               g_engineOn ? "; declared in pc\\audio\\config\\waveslots_sisco.xml, built from " : "", g_engineOn ? g_enginePlan.from : "");
+        SisLog("audio", "engine sound slots %s%s%s%s", SiteText(S_ENGINE, a, sizeof(a)),
+               g_engineOn ? " (from " : "", g_engineOn ? g_enginePlan.from : "", g_engineOn ? ")" : "");
     }
-    SisLog("direct3d", "hook %s", SiteText(S_D3D_IAT, a, sizeof(a)));
+    if (g_site[S_D3D_IAT].state != ST_ON) SisLog("direct3d", "hook %s", SiteText(S_D3D_IAT, a, sizeof(a)));   // on: the direct3d line below says so
     // Every site of the three fixes, named only when one of them is off: the lines above say which fix, this says
     // which site and why. The sites after this one carry their own reason in the lines above.
     for (int s = 0; s <= S_NATIVE_INIT; s++)
@@ -120,7 +146,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (!g_set.budget) return TRUE;                  // the worker only sizes, guards and brakes
     HANDLE t = CreateThread(NULL, 64 * 1024, Worker, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
     if (t) CloseHandle(t);
-    else SisLog("sis", "the worker thread did not start: no sizing and no brake (the fixes stay)");
+    else SisLog("sis", "worker thread did not start: no sizing, no brake (the fixes stay on)");
     return TRUE;
 }
 #endif

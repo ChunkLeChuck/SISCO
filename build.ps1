@@ -123,6 +123,25 @@ foreach ($name in @('1.0.8.0', 'the Complete Edition')) {
     $sitesChecked++
 }
 
+# The build check: the real executables mapped as the loader maps them, and IsKnownBuild asked about each as it is,
+# behind another header, and with the code it reads changed. It needs both games; two more entries in games.txt add the
+# Complete Edition as installed (its megabyte still encrypted) and any other build of the game, both of which must be refused.
+$b1 = $games['1.0.8.0']; $b2 = $games['the Complete Edition']
+if ($b1 -and $b2 -and (Test-Path $b1) -and (Test-Path $b2)) {
+    Write-Host "Asking the build check about the real executables..." -ForegroundColor Cyan
+    $bt = Join-Path $obj 'sis_build.exe'
+    Invoke-Cl "$common `"$root\SIS\sis_build.cpp`" /Fe:`"$bt`" /Fo:`"$obj\sis_build.obj`" /link /SUBSYSTEM:CONSOLE /MACHINE:X86 /INCREMENTAL:NO" 'sis_build.exe build'
+    $btArgs = @($b1, $b2)
+    $b3 = $games['the Complete Edition as installed']; $b4 = $games['another build']
+    if ($b3 -and (Test-Path $b3)) { $btArgs += $b3; if ($b4 -and (Test-Path $b4)) { $btArgs += $b4 } }
+    $btOut = & $bt @btArgs
+    if ($LASTEXITCODE -ne 0) { $btOut | ForEach-Object { Write-Host $_ }; throw "Build check FAILED. Nothing deployed." }
+    $btOut | Where-Object { $_ -match '^SKIPPED' } | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+    Write-Host "  $(@($btOut)[-1])" -ForegroundColor Green
+} else {
+    Write-Host "  SKIPPED: the build check needs both games configured, so it did NOT run" -ForegroundColor Yellow
+}
+
 Write-Host "Checking no instrument has come back..." -ForegroundColor Cyan
 $r = Invoke-Checker @((Join-Path $root 'tools\sis_release_check.py'), $root)
 if ($r.code -ne 0) { $r.out | ForEach-Object { Write-Host $_ }; throw "Release check FAILED. Nothing deployed." }

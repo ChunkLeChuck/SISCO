@@ -79,12 +79,13 @@ for kind, name, va, rest in sites:
     else:
         res(False, f"{name}: unknown kind {kind}")
 
-# IsKnownBuild names each build by a (SizeOfImage, TimeDateStamp) pair: one of them must be this exe's.
+# IsKnownBuild knows each build's stock header as a (SizeOfImage, TimeDateStamp) pair (for the log, since 1.0.5: the
+# code names the build): one of them must be this exe's.
 pairs = [(int(a, 16), int(b, 16)) for a, b in
          re.findall(r"soi == 0x([0-9A-Fa-f]+)u && tds == 0x([0-9A-Fa-f]+)u", text)]
 res((soi, tds) in pairs, f"IsKnownBuild names this build: SizeOfImage 0x{soi:X}, TimeDateStamp 0x{tds:X} (knows {[(hex(s), hex(t)) for s, t in pairs]})")
 if not IS_CE:
-    m3 = re.search(r"slot0 != \(uint32_t\)VA\(0x([0-9A-Fa-f]+)\)", text)
+    m3 = re.search(r"slot0 == \(uint32_t\)VA\(0x([0-9A-Fa-f]+)\)", text)
     res(m3 and pe.read_u32(defines["A_ARENA_VTBL"] - ib) == int(m3.group(1), 16), "IsKnownBuild arena vtable slot 0")
 
 # the core's stock values: the budget row the game uses (row 15 by texture quality) and the car and ped budgets

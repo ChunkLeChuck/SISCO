@@ -35,7 +35,7 @@
 #ifndef SISCO_BUILD
 #define SISCO_BUILD "dev"
 #endif
-#define SIS_VERSION "1.0.3"
+#define SIS_VERSION "1.0.5"
 
 // ---------------------------------------------------------------------------------------------
 // Addresses (1.0.8.0 VA, image base 0x400000), rebased at run time. SITE lines are checked against GTAIV.exe on disk
@@ -133,6 +133,21 @@
 #define A_GAFM          0x40EA20u   // grcResourceCache::GetAvailableFreeMemory
 #define D_CACHE         0x1A72030u  // grcResourceCache object
 #define C_V             0x40268u    // u64: video bytes held (V), cache + 0x40268
+#define C_S             0x402C8u    // u64: system bytes held (S); the next two are bytes of released resources kept for reuse
+#define C_CACHED_V      0x40328u
+#define C_CACHED_S      0x40388u
+// The game's own memory figures (reports/raw/clamp-research-2026-09-26). A Direct3D create that fails with out of video
+// memory (the gate below) lowers each figure the failed resource had bytes in to min(figure, live + 0.9 x cached); only a
+// device reset puts them back, from the saved answer (the restore below; the saved system slot is always 0 and the game
+// re-reads RAM after it). SISCO watches them and never writes them.
+#define D_FIG_VIDEO     0x18CAD50u  // u64
+#define D_FIG_SYSTEM    0x18CAD58u  // u64
+#define D_FIG_SAVED     0x18CAD60u  // u64: the video answer the reset restores
+#define D_FIG_DEAD      0x18CAD68u  // u64: the saved system slot, always 0: never read
+// SITE bytes  FigRestore    0x40E550  F3 0F 7E 05 60 AD 8C 01 66 0F D6 05 50 AD 8C 01 F3 0F 7E 05 68 AD 8C 01 66 0F D6 05 58 AD 8C 01
+#define A_FIG_RESTORE   0x40E550u
+// SITE bytes  FigGate       0x4109D2  3D 7C 01 76 88
+#define A_FIG_GATE      0x4109D2u
 #define D_LINK_POOL     0x1676188u  // the link pool: node array [+0x50], free list [+0x38] (first) to the sentinel +0x3C
 #define D_LINK_LOCK     0x1676180u  // its spinlock
 #define D_SLOT_POOL     0x121B9E0u  // the drawable-slot pool: free list [+0x20] (first) to the sentinel +0x24
@@ -159,6 +174,14 @@
 #define D_PLAYERINFO    0x1100498u  // CPlayerInfo*[32]; +0x58C the player's ped; ped +0x20 matrix; matrix +0x30 position
 #define D_STREAMER      0xF493F0u   // +4: the streamer's N, 0 until the streaming system is up
 #define D_LOADING       0x18CB06Cu  // byte: the loading screen is up
+#define D_FRAME         0x10FCC30u  // u32: the game's frame count, one per game frame (CTimer's update adds 1 below)
+// SITE bytes  FrameCount    0x7CC1DC  83 05 30 CC 0F 01 01
+#define A_FRAME_COUNT   0x7CC1DCu
+// SITE bytes  FrameRead     0x7CC3A1  8B 15 30 CC 0F 01
+#define A_FRAME_READ    0x7CC3A1u   // a load of the count in the timer code, which no FusionFix pattern touches (FrameCountAt)
+#define D_MENU          0x10FC63Fu  // byte: a menu is on screen (FusionFix's CMenuManager::m_MenuActive), read by the check below
+// SITE bytes  MenuCheck     0x6C2701  80 3D 3F C6 0F 01 00 74 4B
+#define A_MENU_CHECK    0x6C2701u
 #define D_VEH_BUDGET    0xF49B98u   // car model budget, bytes; read live by the traffic code (0xA41FED, 0xA41310)
 #define D_PED_BUDGET    0xF49B94u   // ped model budget, bytes; read live (0xA42014)
 // The engine-sound slots (InstallEngineSlots). 0x825490 fills a table by asking the audio config for STREAM_ENGINE_1,
@@ -269,6 +292,14 @@
 #define CE_A_ANCHOR_B      0x4B4015u   // build anchor: float setup in an unrelated function, 340 KB from anchor A
 #define CE_A_CACHE_OFF     0x427719u   // sub eax, [ebx+0x40268]: the cache offset the budget is credited against
 #define CE_D_CACHE         0x1C58BB0u  // +0x148 array, +0x40148 count, +0x40760 lock, +0x40268 V: all unchanged
+#define CE_D_FIG_VIDEO     0x17ED968u
+#define CE_D_FIG_SYSTEM    0x17ED970u
+#define CE_D_FIG_SAVED     0x17ED998u
+#define CE_D_FIG_DEAD      0x17ED9A0u
+// CESITE bytes  FigRestore  0x4397EB  F3 0F 7E 05 98 D9 7E 01 66 0F D6 05 68 D9 7E 01 F3 0F 7E 05 A0 D9 7E 01 66 0F D6 05 70 D9 7E 01
+#define CE_A_FIG_RESTORE   0x4397EBu
+// CESITE bytes  FigGate     0x42968D  3D 7C 01 76 88
+#define CE_A_FIG_GATE      0x42968Du
 #define CE_D_LINK_POOL     0x15F8B48u
 #define CE_D_LINK_LOCK     0x15F8B40u
 #define CE_D_SLOT_POOL     0x1173758u
@@ -294,6 +325,14 @@
 #define CE_D_PLAYERINFO    0x11A8808u  // the player's ped is at +0x598 here, not +0x58C
 #define CE_D_STREAMER      0x103E8D0u
 #define CE_D_LOADING       0x18B6F2Eu
+#define CE_D_FRAME         0x1173604u  // five code signatures from 1.0.8.0's references agree (tools/binhunt derive)
+// CESITE bytes  FrameCount  0x8D0F82  FF 05 04 36 17 01
+#define CE_A_FRAME_COUNT   0x8D0F82u
+// CESITE bytes  FrameRead   0x8D1106  A1 04 36 17 01
+#define CE_A_FRAME_READ    0x8D1106u
+#define CE_D_MENU          0x11609F6u  // eight cross-build signatures from 1.0.8.0's references agree
+// CESITE bytes  MenuCheck   0x47D0A1  80 3D F6 09 16 01 00 74 4B
+#define CE_A_MENU_CHECK    0x47D0A1u
 #define CE_D_VEH_BUDGET    0x10496DCu
 #define CE_D_PED_BUDGET    0x10496D8u
 // CESITE bytes  AudioSlotCap  0x98D50D  83 FF 19
@@ -344,6 +383,56 @@ static bool RdU64(uintptr_t a, uint64_t* o) {
 }
 static bool BytesEq(uintptr_t a, const uint8_t* b, size_t n) {
     __try { return memcmp((const void*)a, b, n) == 0; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// The game's frame count, taken only where the update that counts it reads as expected: the instruction at `at` adds
+// 1 to `count` (add dword [count], 1 on 1.0.8.0, len 7; inc dword [count] on the CE, len 6). FusionFix since 2026-08-06
+// (frameratevigilante.ixx, not in 5.0.1) NOPs that instruction and hooks it with code that still adds 1, which leaves
+// E9 rel32 and the rest 90 there, or all 90 between its two writes. The count is then proven by `reader`, a load of it
+// in the timer code that none of FusionFix's 842 patterns touches (all of them run against both exes, 2026-09-27), and
+// FrameLiveTick makes sure it moves before the taxi throttle trusts it. Otherwise 0, and nothing reads it.
+static uintptr_t FrameCountAt(uintptr_t at, uintptr_t count, int len, uintptr_t reader, bool* hooked) {
+    *hooked = false;
+    uint8_t b[7] = {}, r[6] = {};
+    if (len < 6 || len > 7) return 0;
+    __try {
+        for (int i = 0; i < len; i++) b[i] = *(volatile uint8_t*)(at + i);
+        for (int i = 0; i < 6; i++) r[i] = *(volatile uint8_t*)(reader + i);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    uint32_t operand = 0; memcpy(&operand, b + 2, 4);
+    bool add1 = len == 7 && b[0] == 0x83 && b[1] == 0x05 && b[6] == 1, inc = len == 6 && b[0] == 0xFF && b[1] == 0x05;
+    if ((add1 || inc) && operand == (uint32_t)count) return count;
+    bool fusionFix = b[0] == 0xE9 || b[0] == 0x90;
+    for (int i = b[0] == 0xE9 ? 5 : 1; i < len; i++) if (b[i] != 0x90) fusionFix = false;
+    uint32_t a1 = 0, mov = 0; memcpy(&a1, r + 1, 4); memcpy(&mov, r + 2, 4);
+    bool reads = (r[0] == 0xA1 && a1 == (uint32_t)count) || (r[0] == 0x8B && (r[1] & 0xC7) == 0x05 && mov == (uint32_t)count);
+    if (!fusionFix || !reads) return 0;
+    *hooked = true;
+    return count;
+}
+// The game's memory figures, taken only where the code around them reads as expected: the reset's restore copies the
+// saved video answer and the saved system slot into the two figures (four movq, built here from the addresses), and the
+// create's clamp gate compares against D3DERR_OUTOFVIDEOMEMORY. Otherwise nothing is read, and g_figOff says where.
+static char g_figOff[80];
+static void FigSites(uintptr_t& video, uintptr_t& system, uintptr_t& saved, uintptr_t restore, uint32_t restoreStatic,
+                     uintptr_t gate, uint32_t gateStatic, uintptr_t v, uintptr_t s, uintptr_t sv, uintptr_t dead) {
+    video = system = saved = 0;
+    uint8_t want[32];
+    const uintptr_t order[4] = { sv, v, dead, s };
+    for (int i = 0; i < 4; i++) {
+        want[8 * i] = i % 2 ? 0x66 : 0xF3; want[8 * i + 1] = 0x0F; want[8 * i + 2] = i % 2 ? 0xD6 : 0x7E; want[8 * i + 3] = 0x05;
+        uint32_t a = (uint32_t)order[i]; memcpy(want + 8 * i + 4, &a, 4);
+    }
+    static const uint8_t kGate[5] = { 0x3D, 0x7C, 0x01, 0x76, 0x88 };   // cmp eax, 0x8876017C (D3DERR_OUTOFVIDEOMEMORY)
+    if (!BytesEq(restore, want, 32)) { _snprintf_s(g_figOff, sizeof(g_figOff), _TRUNCATE, "code at 0x%X differs", restoreStatic); return; }
+    if (!BytesEq(gate, kGate, 5)) { _snprintf_s(g_figOff, sizeof(g_figOff), _TRUNCATE, "code at 0x%X differs", gateStatic); return; }
+    g_figOff[0] = 0; video = v; system = s; saved = sv;
+}
+// The menu byte, taken the same way: the instruction at `at` is the game's own cmp byte [menu], 0.
+static uintptr_t MenuByteAt(uintptr_t at, uintptr_t menu) {
+    uint32_t op = 0, operand = 0; uint8_t imm = 1;
+    __try { op = *(volatile uint16_t*)at; operand = *(volatile uint32_t*)(at + 2); imm = *(volatile uint8_t*)(at + 6); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return op == 0x3D80 && imm == 0 && operand == (uint32_t)menu ? menu : 0;
 }
 static bool WriteCode(uintptr_t at, const void* src, size_t n) {
     DWORD old;
@@ -744,6 +833,11 @@ struct CoreSites {                                                    // rebased
     uintptr_t d3dIat, d3dThunk, d3dCall, rdUnmanaged, rdManaged, rdVidmem, prmUnmanaged, prmManaged, prmVidmem;
     uint8_t paramCmpForm;                                             // the two flag readers: cmp against esi or ecx
     uintptr_t table, quality, rt0, cacheV, streamerN, loading, vehBudget, pedBudget, gafm, playerInfo;   // read and written in play
+    uintptr_t frame;               // the game's frame count (FrameCountAt), 0 when its update did not read as expected
+    bool frameHooked;              // taken behind FusionFix's hook on that update
+    uintptr_t menu;                // the menu byte (MenuByteAt), 0 when the game's check on it did not read as expected
+    uintptr_t figVideo, figSystem, figSaved;   // the game's memory figures (FigSites), 0 when the code around them did not read as expected
+    uintptr_t cacheS, cachedV, cachedS;        // the cache's system bytes and the bytes it keeps for reuse, for the clamp line
     uintptr_t poolMode;            // what the game DECIDED about managed resources, not what SISCO asked for
     uintptr_t memRestrictTest, prmNoMemRestrict, prmMemRestrict;   // which budget row the game runs on, asked its way
     uintptr_t setView, setDetail, setCars;   // the player's View Distance, Detail Distance and Car Density: logged, never written
@@ -867,6 +961,7 @@ static bool InstallRaceFix(const CoreSites& c) {
 // 32-bit callers; the budget is not.
 // ---------------------------------------------------------------------------------------------
 static IDXGIAdapter3* g_dxgiAd; static int g_dxgiState;    // 0 untried, 1 ok, -1 failed
+static char g_gpuName[128];                                  // the adapter DXGI picked, named on the direct3d line
 typedef HRESULT (WINAPI* CreateDXGIFactory1_t)(REFIID, void**);
 static void DxgiInit() {
     g_dxgiState = -1;
@@ -897,7 +992,7 @@ static void DxgiInit() {
     // leaves the buffer without a terminator, and the log line would read off the end of it.
     char name[256] = "?";
     if (!WideCharToMultiByte(CP_UTF8, 0, bestDesc.Description, -1, name, sizeof(name), NULL, NULL)) strcpy_s(name, "?");
-    SisLog("vram.dxgi", "%s, LUID %08X:%08X", name, (unsigned)bestDesc.AdapterLuid.HighPart, (unsigned)bestDesc.AdapterLuid.LowPart);
+    _snprintf_s(g_gpuName, sizeof(g_gpuName), _TRUNCATE, "%s", name);
 }
 static bool DxgiPoll(int64_t* budget) {
     if (g_dxgiState != 1) return false;
@@ -909,7 +1004,7 @@ static bool DxgiPoll(int64_t* budget) {
 // ---------------------------------------------------------------------------------------------
 // At the game's Direct3DCreate9: detect DXVK, read the card's budget, and with DXVK give the game
 // -managed (unless the player passed -managed or -unmanaged) and -availablevidmem = the budget in MiB (unless the
-// player passed it; at most 8192). The option slots are written, not the globals: the game re-reads the slot at every device reset,
+// player passed it; at most 8192 on 1.0.8.0, at most half the RAM on the Complete Edition). The option slots are written, not the globals: the game re-reads the slot at every device reset,
 // keeps its own precedence rules, and the player's commandline.txt is still read (a process argument would skip it).
 // ---------------------------------------------------------------------------------------------
 static const GUID kIID_D3D9VkInteropInterface = { 0x3461a81b, 0xce41, 0x485b, { 0xb6, 0xb5, 0xfc, 0xf0, 0x8b, 0xa6, 0xa6, 0xbd } };
@@ -986,13 +1081,46 @@ static bool IsWine() {
 // block at sizing is at least this (Windows shows a few GB) is sized as Windows is; the brake still follows what it
 // measured (BrakeWineLines lowers its lines only for a small block).
 #define WINE_ROOMY_MB 1024
+// Where SISCO reads the free address space on Wine (AddressSpace): 0 not asked yet, 1 the game's Linux memory map,
+// -1 that map could not be found, so the Windows view it gives instead does not see the Linux side.
+static int g_asView;
+// The brake's lines on the Linux view never go under these, however small the layout at sizing (BrakeWineLines): the
+// driver maps video memory into the game's 4 GB in chunks (DXVK's are 16 MB, a player's log, 8ay), so the emergency line
+// keeps room for three of them and the hold for six.
+#define WINE_LINUX_HOLD_MIN_MB 96
+#define WINE_LINUX_EMERGENCY_MIN_MB 48
+// Proton's WoW64 mode, which the player asks for with PROTON_USE_WOW64=1 (Proton 10 and later: its launcher then runs
+// the game on its bin-wow64 build). Wine hands the Linux environment to the game, so the variable reads here. What it
+// changes is the 32-bit address space: a player's two runs of one install on Proton 11 measured 103 MB free at sizing
+// without it and 2,438 MB with it, and without it the brake was at the floor in seven minutes (FINDINGS 8aw). So the
+// platform line says when it is on, and the size line points to it where the layout is fragmented and it is not.
+static bool ProtonWow64() {
+    char v[8] = "";
+    DWORD n = GetEnvironmentVariableA("PROTON_USE_WOW64", v, sizeof(v));
+    return n == 1 && v[0] == '1';
+}
 static int64_t g_bootBudgetMb = -1;      // the card's budget when the game created Direct3D
 static char g_vidmemArg[16];
 static int g_playerVidmemMb;             // the player's own -availablevidmem, 0 if they set none
+static int g_vidmemSetMb;                // the figure SISCO wrote there itself, 0 if it wrote none
 
-// The figure given to the game: the card's budget, at most 8192 MiB. Above that nothing changes (T + X is at most
-// 4,799 MB at 4K), and 8192 is the figure every measured run above the stock budget used: the tested range.
+// The figure given to the game on 1.0.8.0: the card's budget, at most 8192 MiB. Above that nothing changes (T + X is at
+// most 4,799 MB at 4K), and 8192 is the figure every measured run above the stock budget used: the tested range.
 #define VIDMEM_MAX_MB 8192
+// The figure given to the Complete Edition. Until 1.0.5 it was left to the game, because every figure seen there was
+// FusionFix's substitute for the game's own answer: the card's budget, at most half the RAM (16,210 MB on the owner's
+// PC, 15,293 MB in a player's log). Then a player's game answered 2048 MB on a 16 GB card (FINDINGS 8av): FusionFix
+// passes any answer of 2048 MB or more through, and its own substitute is exactly 2048 MB when its DXGI lookup fails.
+// The credit takes the smaller of that figure and budget + render targets, so a budget of 4000 could not be reached
+// there. So SISCO gives the game the figure FusionFix's rule gives, never under its 2048 MB: on an install where the
+// answer was right nothing moves, and where it was not, it is now. No 8192 cap here: that is 1.0.8.0's tested range,
+// and the Complete Edition has run on figures of 15 and 16 GB in every log seen.
+static uint64_t TotalRam();              // below, with the engine slots
+static int64_t CeVidmemMb(int64_t budgetMb, uint64_t ramBytes) {
+    int64_t mb = budgetMb, half = (int64_t)(ramBytes >> 21);
+    if (half > 0 && mb > half) mb = half;
+    return mb < 2048 ? 2048 : mb;
+}
 // The option slot holds a pointer to the argument text, which is how SISCO writes its own. Read it back as a
 // number, and refuse anything that is not plainly one: a figure that bounds the whole sizing is not worth
 // guessing at. The range is the one the game is given anyway, 64 MB up to the 8192 SISCO would write.
@@ -1080,29 +1208,31 @@ static void DxvkVersionOf(void* d3d) {
 }
 static void SisOnFirstD3D(void* d3d) {
     const char* how = "no Direct3D object";
+    bool assumed = false;
     if (d3d) {
         void* ip = NULL;
         HRESULT hr = E_FAIL;
         __try { hr = ((IUnknown*)d3d)->QueryInterface(kIID_D3D9VkInteropInterface, &ip); } __except (EXCEPTION_EXECUTE_HANDLER) { hr = E_FAIL; }
-        if (SUCCEEDED(hr) && ip) { g_dxvk = 1; how = "DXVK (it answered its interop interface)"; ((IUnknown*)ip)->Release(); }
-        else if (VulkanLoaded()) { g_dxvk = 1; how = "DXVK assumed: no interop interface, but vulkan-1.dll is loaded"; }
+        if (SUCCEEDED(hr) && ip) { g_dxvk = 1; how = "DXVK"; ((IUnknown*)ip)->Release(); }
+        else if (VulkanLoaded()) { g_dxvk = 1; how = "DXVK"; assumed = true; }
         else { g_dxvk = 0; how = "native Direct3D 9"; }
         if (g_dxvk == 1) DxvkVersionOf(d3d);
     }
     char ver[320] = "";
     if (g_dxvk == 1) {
-        if (g_dxvkVer[0] >= 0) _snprintf_s(ver, sizeof(ver), _TRUNCATE, "; DXVK %d.%d.%d (read from %s)%s", g_dxvkVer[0], g_dxvkVer[1], g_dxvkVer[2], g_dxvkVerFrom,
-                                           g_dxvkVer[0] >= 3 ? "" : IsWine() ? "; SISCO is tested on 3.x (Proton chose this version; the download's vulkan.dll is not used there)"
-                                                                            : "; SISCO is tested on 3.x, the vulkan.dll in the download");
-        else strcpy_s(ver, "; DXVK version not found in any module");
+        if (g_dxvkVer[0] >= 0) _snprintf_s(ver, sizeof(ver), _TRUNCATE, " %d.%d.%d%s", g_dxvkVer[0], g_dxvkVer[1], g_dxvkVer[2],
+                                           g_dxvkVer[0] >= 3 ? "" : IsWine() ? " (SISCO is tested on 3.x; Proton's choice)"
+                                                                            : " (SISCO is tested on 3.x: use the download's vulkan.dll)");
+        else strcpy_s(ver, " (version not found)");
+        if (assumed) strcat_s(ver, " (assumed: vulkan-1.dll is loaded, no interop interface)");
         if (IsWine()) _snprintf_s(ver + strlen(ver), sizeof(ver) - strlen(ver), _TRUNCATE, "; %s%s", g_wineNote,
-                                  strcmp(g_dxvkVerFrom, "d3d9.dll") == 0 ? " (DXVK loaded as d3d9.dll: on Proton that is Proton's own, ahead of the game folder's vulkan.dll)" : "");
+                                  strcmp(g_dxvkVerFrom, "d3d9.dll") == 0 ? " (Proton's own DXVK, as d3d9.dll)" : "");
     }
     if (g_dxgiState == 0) DxgiInit();
     int64_t b = -1;
     if (DxgiPoll(&b)) g_bootBudgetMb = b >> 20;
     char opts[260] = "";
-    if (g_dxvk == 1 && !g_set.budget) strcpy_s(opts, "; no launch option set (Budget=0 in SISCO.ini)");
+    if (g_dxvk == 1 && !g_set.budget) strcpy_s(opts, "; launch options left alone (Budget=0)");
     else if (g_dxvk == 1) {
         uint32_t un = 0, ma = 0, vm = 0;
         RdU32(g_cs.prmUnmanaged, &un); RdU32(g_cs.prmManaged, &ma); RdU32(g_cs.prmVidmem, &vm);
@@ -1116,20 +1246,29 @@ static void SisOnFirstD3D(void* d3d) {
         // Whatever the player set is the figure the game will believe, on whichever build, so it bounds the
         // sizing later however much memory the card really has.
         g_playerVidmemMb = ReadVidmemArg(vm);
+        g_vidmemSetMb = 0;
         char v[160];
-        // 1.0.8.0 only. The Complete Edition already works out a figure of its own, measured at
-        // 16,210 MB under DXVK, so writing ours could only ever lower it, and on a small card it would.
+        // Both builds: the game is told what the card has, so its own answer never holds the world under the budget
+        // (VIDMEM_MAX_MB and CeVidmemMb say which figure, and why they differ). Not the Complete Edition on Wine: its
+        // own answer there is 3072 MB (a player's Proton 11 logs, 8aw), which held the world at 0.9 x 3072 = 2,765 MB
+        // in both of his runs, and the 32-bit address space is what runs short on Wine. Telling it the card's figure
+        // would let the world hold up to 1.9 GB more than any Wine run has; until one has measured that, the game's
+        // own answer stands there and the sizing stays under it (SisSize). 1.0.8.0 is given its figure on Wine as in 1.0.4.
         if (vm) strcpy_s(v, "the player's -availablevidmem kept");
-        else if (g_cs.build == BUILD_CE) strcpy_s(v, "-availablevidmem left to the Complete Edition, which works out a figure of its own (FusionFix computes one from the card and the RAM)");
+        else if (g_cs.build == BUILD_CE && IsWine()) strcpy_s(v, "-availablevidmem left to the game on Wine");
         else if (g_bootBudgetMb < 512) strcpy_s(v, "-availablevidmem NOT set (no budget from DXGI)");
         else {
-            _snprintf_s(g_vidmemArg, sizeof(g_vidmemArg), _TRUNCATE, "%lld", g_bootBudgetMb > VIDMEM_MAX_MB ? (long long)VIDMEM_MAX_MB : g_bootBudgetMb);
-            if (WrU32(g_cs.prmVidmem, (uint32_t)(uintptr_t)g_vidmemArg)) _snprintf_s(v, sizeof(v), _TRUNCATE, "-availablevidmem %s set", g_vidmemArg);
-            else strcpy_s(v, "-availablevidmem NOT set (write failed)");
+            int64_t mb = g_cs.build == BUILD_CE ? CeVidmemMb(g_bootBudgetMb, TotalRam())
+                                                : g_bootBudgetMb > VIDMEM_MAX_MB ? (int64_t)VIDMEM_MAX_MB : g_bootBudgetMb;
+            _snprintf_s(g_vidmemArg, sizeof(g_vidmemArg), _TRUNCATE, "%lld", (long long)mb);
+            if (WrU32(g_cs.prmVidmem, (uint32_t)(uintptr_t)g_vidmemArg)) {
+                g_vidmemSetMb = (int)mb;
+                _snprintf_s(v, sizeof(v), _TRUNCATE, "-availablevidmem %s set", g_vidmemArg);
+            } else strcpy_s(v, "-availablevidmem NOT set (write failed)");
         }
         _snprintf_s(opts, sizeof(opts), _TRUNCATE, "; %s; %s", m, v);
     }
-    _snprintf_s(g_d3dNote, sizeof(g_d3dNote), _TRUNCATE, "%s%s; card budget %lld MB%s", how, ver, g_bootBudgetMb, opts);
+    _snprintf_s(g_d3dNote, sizeof(g_d3dNote), _TRUNCATE, "%s%s%s%s, card budget %lld MB%s", how, ver, g_gpuName[0] ? "; " : "", g_gpuName, g_bootBudgetMb, opts);
     SisLog("direct3d", "%s", g_d3dNote);
 }
 // ---------------------------------------------------------------------------------------------
@@ -1172,9 +1311,52 @@ static volatile LONG g_showMs = PRESENT_SHOW_MS;   // the one in force
 // loading screen, or an edge where the world's set already existed, as after a save switch: the worker's rule then).
 static volatile LONG g_skipRtEnd;
 static volatile LONG g_skipEndedRt;                // the set, in MB, that ended the skip in the hook; the worker logs it
+// Loads without a loading screen: a taxi skip, a mission start, a respawn. The game shows its in-game loading screen
+// or a faded screen, the render thread draws it over and over, and the game itself draws a few frames a second.
+// FusionFix lifts its frame cap on exactly these screens and turns the game's own sleeps into Sleep(0)
+// (framelimit.ixx sub_855640, loadingdelays.ixx FusionSleep), so the render thread presents as fast as DXVK lets it,
+// and each present waits in DXVK for the one before it while holding the device lock (Presenter::acquireNextImage,
+// dxvk_presenter.cpp:81). The loader needs that lock for every texture it makes under -managed. Measured (T18,
+// 2026-09-25): during a taxi skip 121 presents a second at 7.9 ms each against 2 to 7 game frames a second; driving,
+// 117 presents and 117 game frames a second at 0.01 ms each. The skip took 13 to 30 s at 2 to 14 game frames a second
+// where it takes 2 without the contention (T3, T12); how fast it is otherwise varies with the session (T16, B2).
+// The screens are told by their presents: a REPEAT_WINDOW_MS with at most REPEAT_MAX_FRAMES game frames (under 16 a
+// second) and at least REPEAT_ENGAGE presents per game frame starts the throttle, and a window with at most
+// REPEAT_RELEASE per frame ends it. While it runs one present goes through per PRESENT_SHOW_LOADING_MS and the rest
+// return at once, as on a loading screen. Normal play, menus and cutscenes present once per game frame, and frame
+// generation up to four times, so none of them starts it, and it ends as soon as presents follow the game's frames.
+#define REPEAT_WINDOW_MS 250
+#define REPEAT_MAX_FRAMES 4
+#define REPEAT_ENGAGE 8
+#define REPEAT_RELEASE 4
+static int64_t g_rpWinMs; static uint32_t g_rpWinFrame, g_rpWinCalls;   // the presenting thread's own
+static bool g_rpOn; static int64_t g_rpOnMs, g_rpLastMadeMs; static uint32_t g_rpOnFrame; static LONG g_rpSkipped;
+static volatile LONG g_rpDone;                     // episodes over, for the worker's line; the three below are the last one's
+static volatile LONG g_rpDoneMs, g_rpDoneFrames, g_rpDoneSkipped;
 #ifdef SISCO_TEST
 static int64_t g_tPresentMs = -1;                  // the harness's clock for the hook, -1 = the real one
 #endif
+// Once per present, when not on a loading screen: true when this present is not to be made.
+static bool RepeatThrottle(int64_t now) {
+    uint32_t f = *(volatile uint32_t*)g_cs.frame;
+    if (!g_rpWinMs) { g_rpWinMs = now; g_rpWinFrame = f; g_rpWinCalls = 0; }
+    g_rpWinCalls++;
+    if (now - g_rpWinMs >= REPEAT_WINDOW_MS) {
+        uint32_t frames = f - g_rpWinFrame, per = frames ? frames : 1;   // a count set back reads as a large one: frames moved
+        if (!g_rpOn && frames <= REPEAT_MAX_FRAMES && g_rpWinCalls >= REPEAT_ENGAGE * per) {
+            g_rpOn = true; g_rpOnMs = now; g_rpOnFrame = f; g_rpSkipped = 0;
+        } else if (g_rpOn && g_rpWinCalls <= REPEAT_RELEASE * per) {
+            g_rpOn = false;
+            g_rpDoneMs = (LONG)(now - g_rpOnMs); g_rpDoneFrames = (LONG)(f - g_rpOnFrame); g_rpDoneSkipped = g_rpSkipped;
+            InterlockedIncrement(&g_rpDone);            // after the three: the worker reads them once it sees this move
+        }
+        g_rpWinMs = now; g_rpWinFrame = f; g_rpWinCalls = 0;
+    }
+    if (!g_rpOn) return false;
+    if (now - g_rpLastMadeMs < PRESENT_SHOW_LOADING_MS) { g_rpSkipped++; return true; }
+    g_rpLastMadeMs = now;
+    return false;
+}
 static bool WriteSlot(void** vt, int slot, void* fn) {
     DWORD old = 0;
     if (!VirtualProtect(vt + slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
@@ -1182,8 +1364,36 @@ static bool WriteSlot(void** vt, int slot, void* fn) {
     DWORD o2; VirtualProtect(vt + slot, sizeof(void*), old, &o2);
     return true;
 }
+// A menu on screen gets every frame. The game shows its main menu with the loading-screen flag up, so the loading
+// screen's rule held it to 30 presents a second: M1 (2026-09-26) measured the menu at about 510 game frames and 505
+// presents asked a second, 30 made, and choppy to the eye. The menu byte drops the moment a load starts (M1: at the
+// same second; the load after it kept the rule and took 6 s), and the in-game pause menu presents once per frame
+// anyway (117 asked, 117 made), so only the menu's own frames come back. FusionFix treats a menu over a loading screen
+// the same way (loadingdelays.ixx FusionSleep).
+// Armed by the worker (FrameLiveTick) once a world has loaded and the frame count has been seen moving in play: before
+// the first world there is no load without a loading screen, only splash screens (T19), and a count that does not
+// move would read as a repeated screen on every present, holding normal play to 30 a second.
+static volatile bool g_rpArmed;
+static volatile LONG g_presentCalls;               // every present asked, for FrameLiveTick; the presenting thread's own
 static HRESULT __stdcall HkSwapPresent(void* sc, const RECT* src, const RECT* dst, HWND wnd, const RGNDATA* dirty, DWORD flags) {
+    InterlockedIncrement(&g_presentCalls);
+    if (g_cs.menu && *(volatile uint8_t*)g_cs.menu) {
+        g_rpWinMs = 0; g_rpOn = false;                                       // nothing counted under a menu
+        return g_oSwapPresent(sc, src, dst, wnd, dirty, flags);
+    }
+    if (!g_presentSkip && g_cs.frame) {
+        if (g_rpArmed) {
+            int64_t now =
+#ifdef SISCO_TEST
+                g_tPresentMs >= 0 ? g_tPresentMs :
+#endif
+                NowMs();
+            if (RepeatThrottle(now)) { Sleep(1); return S_OK; }              // not made, as on a loading screen below
+        } else if (g_rpWinMs) { g_rpWinMs = 0; g_rpOn = false; }            // disarmed: an episode it was in ends unlogged
+    }
     if (g_presentSkip) {
+        g_rpWinMs = 0; g_rpOn = false;                                       // a loading screen's own skip rules: a throttle that ran into it ends
+                                                                             // unlogged (the splash before the first one, T19), and play after it starts fresh
         LONG endMb = g_skipRtEnd; uint64_t rt = 0;
         if (endMb > 0 && RdU64(g_cs.rt0, &rt) && (LONG)(rt >> 20) >= endMb) {
             InterlockedExchange(&g_presentSkip, 0);
@@ -1214,8 +1424,11 @@ static HRESULT __stdcall HkCreateDevice(void* d3d, UINT adapter, UINT type, HWND
         g_oSwapPresent = (SwapPresent_t)svt[3];
         if (WriteSlot(svt, 3, (void*)HkSwapPresent)) {
             g_swapVtblHooked = svt;
-            SisLog("present", "the swap chain Present is hooked: most presents are not made while a loading screen is up and while the world builds after it");
-        } else { g_oSwapPresent = NULL; SisLog("present", "the swap chain Present could NOT be hooked: every present is made while a load is in progress, so a VSync or a limiter slows it"); }
+            SisLog("present", "loading skip on: loading screens, world builds%s%s; %s",
+                   g_cs.frame ? ", taxi skips" : "; taxi skips NOT covered (the frame count did not read as expected)",
+                   g_cs.frame && g_cs.frameHooked ? " (frame count behind FusionFix's hook)" : "",
+                   g_cs.menu ? "menus at full frame rate" : "the main menu held to 30 fps (the menu flag did not read as expected)");
+        } else { g_oSwapPresent = NULL; SisLog("present", "Present could NOT be hooked: no loading skip (VSync and frame limiters slow loading)"); }
     }
     ((IUnknown*)sc)->Release();
     return hr;
@@ -1357,8 +1570,11 @@ static bool g_ldUp;              // the loading flag was up on the last tick
 static int64_t g_ldUpMs;         // the worker's clock when it went up: the loading screen's start, for the world line
 static bool g_ldPending = true;  // the flag is down and the player has not appeared yet: the next appearance is a load's edge
 static int64_t g_ldEdgeMs;       // the worker's clock when the player appeared, 0 while no load is being timed
+static int64_t g_ldSettleMs;     // the same, kept past the verdict while the set is still short of the last finished one (BrakeX)
 static int64_t g_ldChangeMs;     // the last tick the render targets changed since the edge: the build's end once they hold
 static int64_t g_ldX;            // the render targets on the last tick, -1 while not built
+static int64_t g_ldScreenS, g_ldEdgeX = -1, g_ldSkipEndS = -1;   // for the load's line: the loading screen, the set at the player, the skip's end
+static LONG g_ldSkipped;         // and the presents it did not make
 static int g_ldSteady;           // ticks they have held that size
 static bool g_ldVerdict;         // the load line has been written for this load
 static int g_loadN;              // loads timed this run
@@ -1368,6 +1584,10 @@ static int64_t g_loadBuildS;     // the last build, in whole seconds: from the e
 #define SKIP_MAX_STEADY 10       // presents are skipped at most this many ticks past the last change, whatever the set's size
 static int g_menuTicks;          // ticks with the loading flag down and nobody in the world: two of them are the menu
 static int g_sizedT, g_sizedTStock, g_sizedX;
+static int g_sizedT0;            // the sizing's own budget: the most a resize ever gives back
+static int g_stockFloorQ[3];     // the game's own budget for each texture quality, read at sizing before SISCO wrote the table
+static int g_floorQ = -1;        // the texture quality the brake's floor was set for
+static int64_t g_shrinkX; static int g_shrinkTicks;   // a smaller render-target set being confirmed (SisResize)
 static bool g_carHeld;        // the car budget stopped where the game's own VehicleStruct pool can use it
 static uint32_t g_setView, g_setDetail, g_setCars;   // the sliders as read at sizing, for the log and the harness
 static int64_t g_settleX = -1; static int g_settleTicks;   // the render targets grow in stages while the world loads
@@ -1402,36 +1622,169 @@ static __forceinline bool PartBuilt(int64_t xMb) { return xMb < RT_PART_BUILT_MB
 // free region is under the 16 MiB DXVK maps at a time), and L only shrinks: memory the game frees stays reserved inside
 // the allocators. So L's LEVEL only starts the brake (and calls an emergency) and L's FALL decides: under HoldMB the
 // budget is held once, at the one whose wall 0.9 x (T + X) - 2 is the V held then (no write when V is already at the
-// wall); after that, each further fall of FallMB since the last action (measured from the highest L seen since it)
-// lowers the budget one StepMB, no sooner than WaitS after the last action. A step turns resident data into reusable
-// room inside the allocators, which is what stops the fall. Under EmergencyMB it steps every WaitS / 2 whether L fell
-// or not. Never raised; never under the floor. Once a second, never while the loading screen is up.
+// wall); after that, each further fall of FallMB under L at the last down action lowers the budget one StepMB, no
+// sooner than WaitS after that action. A step turns resident data into reusable room inside the allocators, which is
+// what stops the fall. Under EmergencyMB it steps every WaitS / 2 whether L fell or not. Never under the floor. Once a
+// second, never while the loading screen is up.
+// The fall is measured from L at the last down action, not from the highest L since: L moves in DXVK's 16 MiB chunks
+// and DXVK gives an empty chunk back after 20 s, so L rising and falling back to where it was costs no address space.
+// Measured from the highest point, that counted as a fall: the field report's steps at 1,481 s and 1,596 s both
+// fired at L 404, after L had risen 16 and 32 MB above the previous step's 420, and cost it two steps it did not need.
 // Every step comes out of the world and none of it out of the traffic: the car and ped budgets follow the budget
 // itself, by the rule that sized them, so they hold at 200 MB until the budget falls under 2000. An earlier
 // version took the steps out of the peds and then the cars, and a field run showed car variety collapsing from 25
 // models to 4 while the world stayed whole, which is the wrong way round.
+//
+// The way back up (docs/TWO-WAY-BUDGET.md, reviewed 2026-09-25). A world size the process has already held can take
+// no new address space (B1), but in every other run it did (BRAKEN, BRAKEN2 and the field report all lost L again at
+// a V they had held), so the budget comes back only to a level measured to hold on this install: one that has stood
+// for BRAKE_UP_SPAN_MS with no down action, L never more than BRAKE_FLAT_MB under its value at the start of that span,
+// and the world pressing it (V within BRAKE_PRESS_MB of its wall) on the tick the proof is taken. The first such level
+// is the ceiling, and the ceiling only ever comes down: to the budget in force when the render targets get smaller for
+// BRAKE_X_TICKS (at a fixed budget they leave the world more room; a device reset dips them for one tick), to the
+// sizing's figure when the render targets grow (SisResize), and to the level a down action lands on when it comes
+// after a raise, however long after, unless it was a burst (BRAKE_BURST_MS) that began more than BRAKE_UP_SPAN_MS after
+// that raise: a taxi skip that steps the budget down from a proven level teaches nothing, and the budget comes back to
+// that level; slow drift after a raise, an emergency, or a fall while the world grows into a raise still lowers it for
+// good (docs/TWO-WAY-BUDGET.md, "Bursts and drift"). Nothing acts while a menu is open. Under the ceiling the budget
+// rises one StepMB when the world presses it, L has not fallen more than BRAKE_FLAT_MB under its highest point for
+// BRAKE_UP_SPAN_MS, L is at least BRAKE_UP_MARGIN_MB over the emergency line, there was no down action for
+// BRAKE_UP_SPAN_MS, and the world has pressed the last raise before the next one. A raise never delays a step or an
+// emergency: their wait counts from the last down action on the clock (downMs), never moved by a pause, as in 1.0.3
+// (the second audit, brake-2: moved by a loading screen, an emergency in the build after it waited up to 10 s). Off where the budget does not map to one world
+// (FusionFix's ExtraStreamingMemory) and on Wine where the lines were lowered (no regrowth measured there).
 // ---------------------------------------------------------------------------------------------
-struct BrakeCfg { int holdMb, fallMb, stepMb, emergencyMb, waitS, floorMb; };
-struct BrakeState { int t; bool held; int64_t refL, lastActMs; };
-enum { BRAKE_NONE = 0, BRAKE_HOLD = 1, BRAKE_STEP = 2, BRAKE_EMERGENCY = 3 };
+struct BrakeCfg { int holdMb, fallMb, stepMb, emergencyMb, waitS, floorMb, raiseOn, capMb, clampCapMb; };   // capMb 0 = no cap; clampCapMb: the lowest cap a followed clamp set, 0 = none
+struct BrakeState {
+    int t; bool held; int64_t refL, lastActMs;   // lastActMs: the last DOWN action (the hold, a step, an emergency)
+    int ceiling;                                  // the level proven to hold, in MB; 0 = not proven yet
+    bool raised;                                  // raised since the last down action: a step now lowers the ceiling
+    bool awaitPress;                              // the last raise has not been pressed into yet
+    int64_t proofMs, proofL;                      // the proof span: its start and L then
+    int64_t quietMs, quietHiL;                    // L has not fallen more than BRAKE_FLAT_MB under quietHiL since quietMs
+    int64_t xRef;                                 // the render targets the proof was running against
+    int ev;                                       // what this tick did to the ceiling (BRAKE_EV_*), for the log
+    int64_t fallMs;                               // when L first fell more than BRAKE_FLAT_MB under refL since the last down action; 0 = not falling
+    int64_t lastUpMs;                             // the last raise
+    int xLowTicks;                                // ticks the render targets have read smaller than xRef
+    int64_t pressMs;                              // when the world first pressed the last raise
+    int64_t downMs;                               // the last down action on the clock: the step and emergency wait, never moved by a pause
+    int64_t lastL, lastLMs;                       // L on the last tick decided, and when; 0 = none (a pause clears it)
+    int fastMb;                                   // what L fell in that one tick when it was a fast fall (BRAKE_FAST_MB), for the log; else 0
+};
+enum { BRAKE_NONE = 0, BRAKE_HOLD = 1, BRAKE_STEP = 2, BRAKE_EMERGENCY = 3, BRAKE_RAISE = 4, BRAKE_CLAMP = 5, BRAKE_FAST = 6 };
+// A fast fall: L down this much from one tick to the next, a second apart (a player's crash, 2026-10-24, FINDINGS 8az:
+// the brake first held at 398 MB, so more than 114 MB went inside the second before, and the game died before its next
+// step could come; 20 s is the step's wait, 10 s the emergency's). Six of DXVK's 16 MB chunks in one second; near the
+// hold line the recorded runs never lost more than 95 MB in five seconds (R5, S3, B2, U1, C1, T16), so normal heavy
+// play does not reach it. A fast fall acts on that tick, without the wait, and twice as hard: two steps at once, and a
+// hold that comes on one goes two steps under what is in use. Each further fast tick acts again.
+#define BRAKE_FAST_MB 96
+#define BRAKE_FAST_GAP_MS 1500    // the two ticks this close: a pause, a stall or a missed tick is not a fast fall
+enum { BRAKE_EV_CEIL_SET = 1, BRAKE_EV_CEIL_LEARNED = 2, BRAKE_EV_CEIL_X = 4, BRAKE_EV_CEIL_CAP = 8 };
+#define BRAKE_UP_SPAN_MS 300000   // a starting value, about twice BRAKEN2's longest quiet stretch that still ended in a loss (165 s)
+#define BRAKE_FLAT_MB 8           // less than one of DXVK's 16 MiB chunks
+#define BRAKE_PRESS_MB 64         // V within this of the wall: the world presses the budget (BRAKEN2 pressed: -2 to +15 MB of credit)
+#define BRAKE_UP_MARGIN_MB 64     // four chunks over the emergency line
+#define BRAKE_X_MB 8              // a render-target change this large is a new resolution
+#define BRAKE_X_TICKS 3           // and a smaller set has to hold this many ticks: a device reset dips it for one (T18: 797, 518, 801 MB)
+// A step whose fall took at most this long is a burst (a taxi skip, a mission start, a warp: L falls 32 MB in seconds),
+// and a burst does not teach the ceiling anything unless it began within BRAKE_UP_SPAN_MS of a raise, or of the world
+// first pressing that raise, or before the world pressed it at all: the world growing into a raise can be as fast, and a
+// raise left unpressed for 5 minutes (a pause, a long stand) is grown into when play resumes (the 1.0.4 review, finding
+// brake-1: timed from the write alone, such falls cycled down and up until L reached the raise line). Drift is slow:
+// BRAKEN2 lost 16 MB every 88 to 165 s at a constant world, so a 32 MB drift fall takes far longer. Owner's choice,
+// 2026-09-26.
+#define BRAKE_BURST_MS 60000
 static int BrakeDecide(BrakeState& st, int64_t nowMs, int64_t vMb, int64_t xMb, int64_t lMb, const BrakeCfg& c, int* action) {
-    *action = BRAKE_NONE;
+    *action = BRAKE_NONE; st.ev = 0;
     if (vMb <= 0 || lMb < 0) return st.t;
+    bool fast = st.lastL > 0 && nowMs - st.lastLMs <= BRAKE_FAST_GAP_MS && st.lastL - lMb >= BRAKE_FAST_MB;
+    st.fastMb = fast ? (int)(st.lastL - lMb) : 0;
+    st.lastL = lMb; st.lastLMs = nowMs;
     if (!st.held) {
         if (lMb >= c.holdMb) return st.t;
-        st.held = true; st.refL = lMb; st.lastActMs = nowMs;
+        st.held = true; st.refL = lMb; st.lastActMs = st.downMs = nowMs;
+        st.proofMs = st.quietMs = nowMs; st.proofL = st.quietHiL = lMb; st.xRef = xMb;
         int64_t t = ((vMb + 2) * 10 + 8) / 9 - xMb;      // rounded up: at the wall this gives back the budget itself
+        if (fast) t -= 2 * c.stepMb;                     // reached on a fast fall: two steps under what is in use
         if (t < c.floorMb) t = c.floorMb;
         if (t < st.t) { st.t = (int)t; *action = BRAKE_HOLD; }
         return st.t;
     }
-    if (lMb > st.refL) st.refL = lMb;                     // each fall is measured from the highest L since the last action
+    if (xMb <= st.xRef - BRAKE_X_MB) {
+        if (++st.xLowTicks >= BRAKE_X_TICKS) {
+            if (st.ceiling > st.t) { st.ceiling = st.t; st.ev |= BRAKE_EV_CEIL_X; }
+            st.xRef = xMb; st.proofMs = nowMs; st.proofL = lMb; st.xLowTicks = 0;
+        }
+    } else {
+        st.xLowTicks = 0;
+        if (xMb >= st.xRef + BRAKE_X_MB) { st.xRef = xMb; st.proofMs = nowMs; st.proofL = lMb; }
+    }
+    if (c.capMb > 0 && st.ceiling > c.capMb) { st.ceiling = c.capMb; st.ev |= BRAKE_EV_CEIL_CAP; }   // a resize or a followed clamp lowered the cap
+    if (lMb > st.quietHiL) st.quietHiL = lMb;
+    if (st.quietHiL - lMb > BRAKE_FLAT_MB) { st.quietMs = nowMs; st.quietHiL = lMb; }
+    if (lMb < st.proofL - BRAKE_FLAT_MB) { st.proofMs = nowMs; st.proofL = lMb; }
+    bool pressed = vMb >= 9 * ((int64_t)st.t + xMb) / 10 - 2 - BRAKE_PRESS_MB;
+    if (st.awaitPress && pressed) { st.awaitPress = false; st.quietMs = nowMs; st.pressMs = nowMs; }
+    if (lMb < st.refL - BRAKE_FLAT_MB) { if (!st.fallMs) st.fallMs = nowMs; }
+    else st.fallMs = 0;
     bool emergency = lMb < c.emergencyMb;
-    if (nowMs - st.lastActMs < (int64_t)(emergency ? c.waitS / 2 : c.waitS) * 1000) return st.t;
-    if (!emergency && st.refL - lMb < c.fallMb) return st.t;
-    st.refL = lMb; st.lastActMs = nowMs;
-    int t = st.t - c.stepMb; if (t < c.floorMb) t = c.floorMb;
-    if (t < st.t) { st.t = t; *action = emergency ? BRAKE_EMERGENCY : BRAKE_STEP; }
+    if (fast) {                                          // no wait, two steps; a burst as any step is (BRAKE_BURST_MS)
+        bool burst = st.fallMs && nowMs - st.fallMs <= BRAKE_BURST_MS && st.fallMs - st.lastUpMs >= BRAKE_UP_SPAN_MS
+                     && !st.awaitPress && st.fallMs - st.pressMs >= BRAKE_UP_SPAN_MS;
+        st.refL = lMb; st.lastActMs = st.downMs = nowMs; st.proofMs = nowMs; st.proofL = lMb; st.fallMs = 0;
+        int t = st.t - 2 * c.stepMb; if (t < c.floorMb) t = c.floorMb;
+        if (t < st.t) {
+            st.t = t; *action = BRAKE_FAST;
+            if (st.raised && !burst && st.ceiling > t) { st.ceiling = t; st.ev |= BRAKE_EV_CEIL_LEARNED; }
+            st.raised = st.awaitPress = false;
+        }
+        return st.t;
+    }
+    if (nowMs - st.downMs >= (int64_t)(emergency ? c.waitS / 2 : c.waitS) * 1000 && (emergency || st.refL - lMb >= c.fallMb)) {
+        bool burst = !emergency && st.fallMs && nowMs - st.fallMs <= BRAKE_BURST_MS && st.fallMs - st.lastUpMs >= BRAKE_UP_SPAN_MS
+                     && !st.awaitPress && st.fallMs - st.pressMs >= BRAKE_UP_SPAN_MS;
+        st.refL = lMb; st.lastActMs = st.downMs = nowMs; st.proofMs = nowMs; st.proofL = lMb; st.fallMs = 0;
+        int t = st.t - c.stepMb; if (t < c.floorMb) t = c.floorMb;
+        if (t < st.t) {
+            st.t = t; *action = emergency ? BRAKE_EMERGENCY : BRAKE_STEP;
+            if (st.raised && !burst && st.ceiling > t) { st.ceiling = t; st.ev |= BRAKE_EV_CEIL_LEARNED; }
+            st.raised = st.awaitPress = false;
+        }
+        return st.t;
+    }
+    if (!c.raiseOn) return st.t;
+    // Nothing is proven or raised while a smaller render-target set is still being confirmed: the X rule would then take
+    // the raised level as the ceiling (the 1.0.4 review, brake-3).
+    if (st.xLowTicks) return st.t;
+    if (!st.ceiling && pressed && nowMs - st.proofMs >= BRAKE_UP_SPAN_MS) {
+        st.ceiling = c.capMb > 0 && st.t > c.capMb ? c.capMb : st.t; st.ev |= BRAKE_EV_CEIL_SET;
+    }
+    // The world pressing a raise restarts the quiet window above, so the next raise waits BRAKE_UP_SPAN_MS from then.
+    if (st.ceiling > st.t && pressed && nowMs - st.quietMs >= BRAKE_UP_SPAN_MS
+        && nowMs - st.lastActMs >= BRAKE_UP_SPAN_MS && lMb >= c.emergencyMb + BRAKE_UP_MARGIN_MB) {
+        st.t = st.t + c.stepMb < st.ceiling ? st.t + c.stepMb : st.ceiling;
+        st.raised = st.awaitPress = true; st.lastUpMs = nowMs; *action = BRAKE_RAISE;
+    }
+    return st.t;
+}
+// The game lowered its video figure (a create failed; FigTick): the world it allows is then min(figure, T + X) in both
+// its credit and its budget (0x40EA20, 0x40F140), so a brake step above figure - X would shrink nothing while still
+// cutting the car and ped budgets. The brake follows the figure down instead: its budget to figure - X, never under the
+// floor, as a down action, and the raise cap with it for good (a restore by the game does not lift it: that level
+// failed once). With T + X at or under the figure the game's limit is unchanged or lower, so the write evicts nothing
+// the game's own clamp has not already evicted. capOnly: the game has already restored its figures, so its limit is its
+// full figure again and a write would evict under it; the cap alone comes down. Pure: in the harness.
+static int BrakeFollowClamp(BrakeState& st, BrakeCfg& c, int64_t nowMs, int64_t figMb, int64_t xMb, int64_t lMb, bool capOnly, int* action) {
+    *action = BRAKE_NONE;
+    int64_t cap64 = figMb - xMb;
+    int cap = cap64 < c.floorMb ? c.floorMb : cap64 > 1000000 ? 1000000 : (int)cap64;
+    if (c.capMb <= 0 || cap < c.capMb) c.capMb = cap;
+    if (c.clampCapMb <= 0 || cap < c.clampCapMb) c.clampCapMb = cap;   // a resize that gives the budget back stops here too
+    if (capOnly || st.t <= cap) return st.t;
+    st.t = cap; *action = BRAKE_CLAMP;
+    st.lastActMs = st.downMs = nowMs; st.refL = lMb; st.proofMs = nowMs; st.proofL = lMb; st.fallMs = 0; st.raised = st.awaitPress = false;
     return st.t;
 }
 static int g_brakeOn;
@@ -1439,9 +1792,11 @@ static int g_brakeOn;
 // 192 MB (12 of DXVK's 16 MiB chunks left). On Wine BrakeWineLines lowers both from here.
 #define BRAKE_HOLD_MB 512
 #define BRAKE_EMERGENCY_MB 192
-static BrakeCfg g_brakeCfg = { BRAKE_HOLD_MB, 32, 128, BRAKE_EMERGENCY_MB, 20, 800 };
-static const char* AddrSpaceNote(char* out, size_t cap);   // below, with the address-space walk: the brake lines carry the layout on Wine
+static BrakeCfg g_brakeCfg = { BRAKE_HOLD_MB, 32, 128, BRAKE_EMERGENCY_MB, 20, 800, 0, 0 };
+static const char* AddrSpaceNote(char* out, size_t cap);   // below, with the address-space walk: the size line carries the layout on Wine
+static const char* BrakeSpace(char* out, size_t cap, int64_t lMb);   // below too: what a brake line says about the address space
 static BrakeState g_brakeSt;
+static int64_t g_brakePauseMs;      // the first tick the brake did not decide on (BrakePause, below), 0 while it decides
 // All 48 cells, aligned 32-bit stores of the low dword (8v: safe from any thread; the high dword is 0 for every value
 // under 4 GiB and stays so).
 static bool WriteBudgetAll(uintptr_t table, int mb) {
@@ -1451,25 +1806,39 @@ static bool WriteBudgetAll(uintptr_t table, int mb) {
     DWORD o2; VirtualProtect((void*)table, 48 * 8, old, &o2);
     return true;
 }
-static void BrakeStart(int tMb, int floorMb) {
+// raiseOn: false where a budget does not map to one world, FusionFix's ExtraStreamingMemory (its multiplier moves with
+// the working set); BrakeWineLines turns it off too when it lowers the lines. capMb: the sizing's figure, which
+// SisResize lowers when the render targets grow; no raise goes past it.
+static void BrakeStart(int tMb, int floorMb, bool raiseOn) {
     g_brakeCfg.floorMb = floorMb < tMb ? floorMb : tMb;
     g_brakeCfg.holdMb = BRAKE_HOLD_MB; g_brakeCfg.emergencyMb = BRAKE_EMERGENCY_MB;
-    g_brakeSt.t = tMb; g_brakeSt.held = false; g_brakeSt.refL = -1; g_brakeSt.lastActMs = 0;
+    g_brakeCfg.raiseOn = raiseOn; g_brakeCfg.capMb = tMb; g_brakeCfg.clampCapMb = 0;
+    g_brakeSt = BrakeState{};
+    g_brakeSt.t = tMb; g_brakeSt.refL = -1;
+    g_brakePauseMs = 0;
     g_brakeOn = 1;
 }
 // On Wine the largest free block is small from the start (269 MB on a Deck with nothing loaded), so the Windows
 // lines would hold at the first tick, which is what happened to that Deck. There the lines follow the block measured
 // at sizing: a hold at half of it, an emergency at a quarter, never above the Windows figures. A guess until a Deck
-// has measured a fall; the layout on every brake line is what will replace it.
+// has measured a fall; the layout on every brake line is what will replace it. With the lines lowered the brake only
+// lowers: no regrowth has been measured on such a layout, and on the recorded Deck the hold already goes to the floor.
 static void BrakeWineLines(int64_t lAtSizingMb) {
     if (lAtSizingMb <= 0) return;
-    if (lAtSizingMb / 2 < g_brakeCfg.holdMb) g_brakeCfg.holdMb = (int)(lAtSizingMb / 2);
-    if (lAtSizingMb / 4 < g_brakeCfg.emergencyMb) g_brakeCfg.emergencyMb = (int)(lAtSizingMb / 4);
+    int64_t hold = lAtSizingMb / 2, em = lAtSizingMb / 4;
+    if (g_asView == 1) {                                                     // the Linux view: never under the driver's chunks
+        if (hold < WINE_LINUX_HOLD_MIN_MB) hold = WINE_LINUX_HOLD_MIN_MB;
+        if (em < WINE_LINUX_EMERGENCY_MIN_MB) em = WINE_LINUX_EMERGENCY_MIN_MB;
+    }
+    if (hold < g_brakeCfg.holdMb) { g_brakeCfg.holdMb = (int)hold; g_brakeCfg.raiseOn = 0; }
+    if (em < g_brakeCfg.emergencyMb) g_brakeCfg.emergencyMb = (int)em;   // only ever with the hold lowered too
 }
 
 // The car and ped budgets as SISCO keeps them: the target, and what it last wrote (anything else there was written by
 // someone else: FusionFix's asynchronous init, or another mod).
-struct TrafficBudget { uintptr_t addr; uint32_t stock, full, target, written, fromOther; bool on; const char* name; };
+// sized: what the sizing set, which a raise never goes past (it holds the car budget at CAR_NO_POOL when the
+// VehicleStruct pool was not raised).
+struct TrafficBudget { uintptr_t addr; uint32_t stock, full, target, written, fromOther; bool on; const char* name; uint32_t sized; };
 static TrafficBudget g_car = { 0, CAR_STOCK, CAR_FULL, 0, 0, 0, false, "car" }, g_ped = { 0, PED_STOCK, PED_FULL, 0, 0, 0, false, "ped" };
 static void TrafficSet(TrafficBudget& b, uint32_t v) {
     b.target = v;
@@ -1481,7 +1850,7 @@ static void TrafficGuard(TrafficBudget& b) {
     uint32_t cur = 0;
     if (!RdU32(b.addr, &cur) || cur == b.written) return;
     if (cur > b.target && cur <= 1000000000u) {
-        SisLog("budget", "the %s budget was set to %u MB by another mod: kept (SISCO had %u MB)", b.name, cur / 1000000, b.target / 1000000);
+        SisLog("budget", "%s set to %u MB by another mod: kept (SISCO's %u MB)", b.name, cur / 1000000, b.target / 1000000);
         b.target = b.written = b.fromOther = cur;
         return;
     }
@@ -1489,8 +1858,9 @@ static void TrafficGuard(TrafficBudget& b) {
 }
 // When the brake lowers the budget, the world gives: the car and ped budgets follow the budget itself, by the same
 // rule that sized them, so they stay full until the budget falls under 2000 MB and only then scale with it. A larger
-// value another mod set always stands. Never raised. Measured: taking it from the traffic first drops car variety
-// from 25 models to between 4 and 9 while the world stays whole, which is the wrong way round.
+// value another mod set always stands. Measured: taking it from the traffic first drops car variety from 25 models to
+// between 4 and 9 while the world stays whole, which is the wrong way round. When the brake raises the budget back,
+// they come back with it by the same rule, never past what the sizing gave them (TrafficRaise).
 static void TrafficFollow(int tMb, int tStock) {
     TrafficBudget* both[2] = { &g_car, &g_ped };
     for (int i = 0; i < 2; i++) {
@@ -1499,22 +1869,121 @@ static void TrafficFollow(int tMb, int tStock) {
         uint32_t want = CarPedFor(b.stock, b.full, tMb, tStock);
         if (b.fromOther > want) want = b.fromOther;
         if (want >= b.target) continue;
-        SisLog("budget", "the %s budget follows the world's: %u -> %u MB", b.name, b.target / 1000000, want / 1000000);
+        SisLog("budget", "%s %u -> %u MB (with the world budget)", b.name, b.target / 1000000, want / 1000000);
+        TrafficSet(b, want);
+    }
+}
+static void TrafficRaise(int tMb, int tStock) {
+    TrafficBudget* both[2] = { &g_car, &g_ped };
+    for (int i = 0; i < 2; i++) {
+        TrafficBudget& b = *both[i];
+        if (!b.on) continue;
+        uint32_t want = CarPedFor(b.stock, b.full, tMb, tStock);
+        if (want > b.sized) want = b.sized;
+        if (want <= b.target) continue;
+        SisLog("budget", "%s %u -> %u MB (back with the world budget)", b.name, b.target / 1000000, want / 1000000);
         TrafficSet(b, want);
     }
 }
 
+// The game's memory figures as SISCO last accepted them (FigTick, with the sizing below). followV: the lowest video figure
+// a clamp set since the brake last followed one, which a restore before the follow must not erase (the 1.0.4 review,
+// clamp-2: the follow read the restored figure and never lowered the cap).
+struct FigWatch { bool accepted, pending, follow, resetTick; uint64_t video, system, saved, pendV, pendS, followV; int clamps, restores, blips; int64_t clampMs; };
+static FigWatch g_fig;
+#define FIG_LINES_MAX 8             // clamp lines, and the brake's lines for following them; after that, a count every tenth
+// Ticks the brake does not decide on (a menu, a loading screen, a device reset's tick, the world not readable) are not
+// play: its windows (the proof, the quiet time, the wait after a down action, the burst's clocks) move on by the time
+// they took, so a pause proves nothing and a raise after it waits for play (the 1.0.4 review, brake-2).
+static void BrakePause(int64_t nowMs) { if (!g_brakePauseMs) g_brakePauseMs = nowMs; }
+static void BrakeResume(BrakeState& st, int64_t nowMs) {
+    if (!g_brakePauseMs) return;
+    int64_t d = nowMs - g_brakePauseMs; g_brakePauseMs = 0;
+    if (d <= 0) return;
+    int64_t* w[6] = { &st.lastActMs, &st.proofMs, &st.quietMs, &st.lastUpMs, &st.pressMs, &st.fallMs };
+    for (int i = 0; i < 6; i++) if (*w[i]) *w[i] += d;                   // 0 = never set: stays so
+}
+// The render targets the brake reasons with. While a load builds, the targets hold the loading screen's small set (63 MB
+// at 4K, 5 on a Deck) for up to the whole build; read as they are, they were a resolution drop that lowered the ceiling,
+// a wall 700 MB off, and a clamp followed to the wrong figure (the 1.0.4 review: the judge's new finding, and clamp-1).
+// Until the load tracker has judged the build over (LoadTick: the set has held, for up to SETTLE_LONG_TICKS when it
+// looks part-built, never past LOAD_CEILING_MS), and after that until the set is back to the last finished one (a stage
+// short of it can hold past the verdict, the second audit's brake-3; never past LOAD_CEILING_MS from the edge), the last
+// finished set stands in: SisResize's, which it keeps by the same three-tick rule outside a load, in a menu too. The
+// brake's own reference is only moved where the brake decides, never in a menu: a resolution changed there and a load
+// straight from it followed a clamp against the old set (brake-5). Outside a load a small set is taken as it is: a real
+// switch to 720p makes one.
+static int64_t BrakeX(int64_t xMb) {
+    if (!g_ldPending && !g_ldEdgeMs && !g_ldSettleMs) return xMb;
+    return g_sizedX > 0 ? g_sizedX : xMb;
+}
 static void BrakeTick(uintptr_t table, int64_t nowMs, int64_t vMb, int64_t xMb, int64_t lMb, bool loading) {
     if (!g_brakeOn) return;
-    if (loading) return;
+    if (loading) { BrakePause(nowMs); return; }
+    // A menu open: the world is paused, and the menu is where the device resets (VSync, resolution) that dip the render
+    // targets and V for a tick (T18). Nothing is decided on such ticks, nor on the tick a reset is seen in the figures.
+    if (g_cs.menu && *(volatile uint8_t*)g_cs.menu) { BrakePause(nowMs); return; }
+    if (g_fig.resetTick) { BrakePause(nowMs); return; }
+    BrakeResume(g_brakeSt, nowMs);
+    xMb = BrakeX(xMb);
+    if (g_fig.follow) {                                                      // the game clamped its video figure: follow it first
+        BrakeState before = g_brakeSt; int act = BRAKE_NONE;
+        uint64_t fv = g_fig.followV ? g_fig.followV : g_fig.video;
+        int64_t figMb = (int64_t)(fv >> 20);
+        bool restored = g_fig.video > fv;                                    // the game put its figures back before this tick
+        int t = BrakeFollowClamp(g_brakeSt, g_brakeCfg, nowMs, figMb, xMb, lMb, restored, &act);
+        if (act == BRAKE_CLAMP && !WriteBudgetAll(table, t)) { g_brakeSt = before; return; }   // not written: tried again next tick
+        g_fig.follow = false; g_fig.followV = 0;
+        char as[120]; BrakeSpace(as, sizeof(as), lMb);
+        bool underFloor = figMb - xMb < g_brakeCfg.floorMb;
+        if (act == BRAKE_CLAMP) {
+            if (g_fig.clamps <= FIG_LINES_MAX)
+                SisLog("brake", "followed the clamp at %lld s: budget %d -> %d MB (video figure %lld less render targets %lld MB%s; %s)",
+                       nowMs / 1000, before.t, t, figMb, xMb, underFloor ? ", under SISCO's floor: the game's figure holds the world lower" : "", as);
+            TrafficFollow(t, g_sizedTStock);
+        } else if (g_fig.clamps <= FIG_LINES_MAX) {
+            if (restored)
+                SisLog("brake", "clamp restored before the follow (at %lld s): video figure %lld less render targets %lld MB%s; "
+                       "raises stop at %d MB, budget stays %d MB", nowMs / 1000, figMb, xMb,
+                       underFloor ? " is under SISCO's floor" : "", g_brakeCfg.capMb, t);
+            else if (underFloor)
+                SisLog("brake", "clamp needs no write at %lld s: video figure %lld less render targets %lld MB is under SISCO's floor; "
+                       "raises stop at %d MB, budget stays %d MB", nowMs / 1000, figMb, xMb, g_brakeCfg.capMb, t);
+            else
+                SisLog("brake", "clamp needs no write at %lld s: budget %d MB already at or under video figure %lld less render targets %lld MB; raises stop at %d MB",
+                       nowMs / 1000, t, figMb, xMb, g_brakeCfg.capMb);
+        }
+        return;
+    }
     BrakeState before = g_brakeSt;
     int act = BRAKE_NONE, t = BrakeDecide(g_brakeSt, nowMs, vMb, xMb, lMb, g_brakeCfg, &act);
-    if (act == BRAKE_NONE) return;
-    if (!WriteBudgetAll(table, t)) { g_brakeSt = before; return; }   // not written: as if this tick never happened
-    char as[120];
-    SisLog("brake", "%s at %lld s: budget %d -> %d MB (video memory held %lld MB, largest free block %lld MB%s)",
-           act == BRAKE_HOLD ? "held" : act == BRAKE_STEP ? "stepped" : "EMERGENCY step", nowMs / 1000, before.t, t, vMb, lMb, AddrSpaceNote(as, sizeof(as)));
-    TrafficFollow(t, g_sizedTStock);
+    if (act == BRAKE_NONE && !g_brakeSt.ev) return;
+    if (act != BRAKE_NONE && !WriteBudgetAll(table, t)) { g_brakeSt = before; return; }   // not written: as if this tick never happened
+    char as[120]; BrakeSpace(as, sizeof(as), lMb);
+    if (act == BRAKE_RAISE)
+        SisLog("brake", "raised at %lld s: budget %d -> %d MB (ceiling %d MB, V %lld MB, %s)",
+               nowMs / 1000, before.t, t, g_brakeSt.ceiling, vMb, as);
+    else if (act != BRAKE_NONE)
+    {
+        char fell[48] = "";
+        if (g_brakeSt.fastMb) _snprintf_s(fell, sizeof(fell), _TRUNCATE, "; it fell %d MB in one second", g_brakeSt.fastMb);
+        SisLog("brake", "%s at %lld s: budget %d -> %d MB (V %lld MB, %s%s)",
+               act == BRAKE_HOLD ? (g_brakeSt.fastMb ? "held on a fast fall" : "held") : act == BRAKE_STEP ? "stepped"
+               : act == BRAKE_FAST ? "FAST fall, two steps" : "EMERGENCY step", nowMs / 1000, before.t, t, vMb, as, fell);
+    }
+    if (g_brakeSt.ev & BRAKE_EV_CEIL_SET)
+        SisLog("brake", "ceiling set at %d MB: %d s of play, address space flat, world pressing (%s)",
+               g_brakeSt.ceiling, BRAKE_UP_SPAN_MS / 1000, as);
+    if (g_brakeSt.ev & BRAKE_EV_CEIL_X)
+        SisLog("brake", "ceiling lowered to %d MB: render targets smaller (%lld MB)",
+               g_brakeSt.ceiling, xMb);
+    if (g_brakeSt.ev & BRAKE_EV_CEIL_LEARNED)
+        SisLog("brake", "ceiling lowered to %d MB: a step after a raise",
+               g_brakeSt.ceiling);
+    if (g_brakeSt.ev & BRAKE_EV_CEIL_CAP)
+        SisLog("brake", "ceiling lowered to %d MB: capped (larger render targets or the game's clamp)", g_brakeSt.ceiling);
+    if (act == BRAKE_RAISE) TrafficRaise(t, g_sizedTStock);
+    else if (act != BRAKE_NONE) TrafficFollow(t, g_sizedTStock);
 }
 
 // The free address space, from the tool's own thread: the largest block (the brake's L), the total, and how many
@@ -1523,12 +1992,141 @@ static void BrakeTick(uintptr_t table, int64_t nowMs, int64_t vMb, int64_t xMb, 
 struct AddrSpace { uint64_t largest, total; int blocks; };
 #ifdef SISCO_TEST
 static AddrSpace g_tAddrSpace;           // planted by the harness when its largest is not 0
+static const char* g_tProcRoot;          // the harness's stand-in for Z:\proc
 #endif
+// On Wine the Windows view is not the whole address space (a player's Linux machine, 2026-10-19, FINDINGS 8ay). In
+// Proton's old 32-bit mode the Linux side lives in the same 4 GB: the graphics driver, and above all its mappings of video
+// memory, about 1 GB on his machine before DXVK could not map one more 16 MB chunk and the game died. VirtualQuery sees
+// none of it: SISCO's size line read 87 MB free, the largest block 27 MB, on every run whatever the game did, and the
+// brake never stepped. So on Wine the free space is read from Linux: the unmapped gaps under 4 GB in the game's own
+// /proc/<pid>/maps. A file is opened by wineserver, so /proc/self would be wineserver's: the game's pid is found once
+// among /proc/*/cmdline (GTAIV.exe) and confirmed by SISCO's own image in its map (his way of reading it, which gave
+// the numbers he saw from outside). Read through drive Z:, which Proton maps to /.
+static uintptr_t g_selfBase;             // SISCO's own image, which the game's map shows (DllMain)
+static char g_selfName[64];              // its file name, lower case
+static char g_procMaps[80];              // the game's map, as Wine opens it
+static char* g_mapsBuf; static const size_t kMapsCap = 2u << 20;   // allocated on Wine only, at the first read
+// The unmapped gaps of a maps text from 64 KB to `limit`: the largest, the total, how many of at least 1 MB. A text cut
+// short (`whole` false) gives no gap after its last line: what was not read is not counted as free.
+static AddrSpace MapsGaps(const char* t, size_t n, uint64_t limit, bool whole, bool* above4g = NULL) {
+    AddrSpace a = { 0, 0, 0 };
+    if (above4g) *above4g = false;
+    uint64_t prev = 0x10000;
+    auto gap = [&](uint64_t from, uint64_t to) {
+        if (to > limit) to = limit;
+        if (to <= from) return;
+        uint64_t g = to - from;
+        if (g > a.largest) a.largest = g;
+        a.total += g;
+        if (g >= (1u << 20)) a.blocks++;
+    };
+    auto hexv = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+    for (size_t i = 0; i < n;) {
+        uint64_t s = 0, e = 0; size_t j = i; int d1 = 0, d2 = 0;
+        while (j < n && hexv(t[j]) >= 0 && d1 < 16) { s = s * 16 + hexv(t[j]); j++; d1++; }
+        if (d1 && j < n && t[j] == '-') {
+            j++;
+            while (j < n && hexv(t[j]) >= 0 && d2 < 16) { e = e * 16 + hexv(t[j]); j++; d2++; }
+            if (d2 && e > s) {
+                if (above4g && s >= 0x100000000ull) *above4g = true;
+                if (s > prev) gap(prev, s);
+                if (e > prev) prev = e;
+            }
+        }
+        while (j < n && t[j] != '\n') j++;
+        i = j + 1;
+    }
+    if (whole) gap(prev, limit);
+    return a;
+}
+static const char* ProcRoot() {
+#ifdef SISCO_TEST
+    if (g_tProcRoot) return g_tProcRoot;
+#endif
+    return "Z:\\proc";
+}
+static size_t ReadWhole(const char* path, char* buf, size_t cap, bool* whole) {
+    *whole = false;
+    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    size_t n = 0; DWORD r = 0;
+    while (n < cap - 1) {
+        DWORD want = (DWORD)((cap - 1 - n) < 65536 ? (cap - 1 - n) : 65536);
+        if (!ReadFile(h, buf + n, want, &r, NULL)) break;
+        if (!r) { *whole = true; break; }
+        n += r;
+    }
+    CloseHandle(h);
+    buf[n] = 0;
+    return n;
+}
+// Whether a maps text has a line that starts at SISCO's own image and names its file.
+static bool MapsHasSelf(const char* t, size_t n) {
+    char want[24]; _snprintf_s(want, sizeof(want), _TRUNCATE, "%08x-", (unsigned)g_selfBase);
+    size_t w = strlen(want);
+    for (size_t i = 0; i + w <= n; ) {
+        size_t e = i; while (e < n && t[e] != '\n') e++;
+        if (e - i > w && !_strnicmp(t + i, want, w)) {
+            char line[512]; size_t k = 0;
+            for (size_t q = i; q < e && k < sizeof(line) - 1; q++) line[k++] = (char)tolower((unsigned char)t[q]);
+            line[k] = 0;
+            if (g_selfName[0] && strstr(line, g_selfName)) return true;
+        }
+        i = e + 1;
+    }
+    return false;
+}
+// Once: the game's maps file. Every /proc/<n> whose command line names GTAIV.exe is a candidate; the one whose map holds
+// SISCO's own image is the game. With no such map (an image Wine copied rather than mapped) a lone candidate stands.
+static bool FindGameMaps() {
+    if (!g_mapsBuf) g_mapsBuf = (char*)VirtualAlloc(NULL, kMapsCap, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!g_mapsBuf) return false;
+    char pat[MAX_PATH]; _snprintf_s(pat, sizeof(pat), _TRUNCATE, "%s\\*", ProcRoot());
+    WIN32_FIND_DATAA f;
+    HANDLE fh = FindFirstFileA(pat, &f);
+    if (fh == INVALID_HANDLE_VALUE) return false;
+    int cands = 0; char lone[80] = "";
+    do {
+        bool digits = f.cFileName[0] != 0;
+        for (const char* c = f.cFileName; *c; c++) if (*c < '0' || *c > '9') { digits = false; break; }
+        if (!digits) continue;
+        char p[MAX_PATH], cmd[1024]; bool whole;
+        _snprintf_s(p, sizeof(p), _TRUNCATE, "%s\\%s\\cmdline", ProcRoot(), f.cFileName);
+        size_t n = ReadWhole(p, cmd, sizeof(cmd), &whole);
+        for (size_t i = 0; i < n; i++) cmd[i] = cmd[i] ? (char)tolower((unsigned char)cmd[i]) : ' ';
+        if (!n || !strstr(cmd, "gtaiv.exe")) continue;
+        cands++;
+        char m[80]; _snprintf_s(m, sizeof(m), _TRUNCATE, "%s\\%s\\maps", ProcRoot(), f.cFileName);
+        if (cands == 1) strcpy_s(lone, m);
+        size_t mn = ReadWhole(m, g_mapsBuf, kMapsCap, &whole);
+        if (mn && MapsHasSelf(g_mapsBuf, mn)) { strcpy_s(g_procMaps, m); FindClose(fh); return true; }
+    } while (FindNextFileA(fh, &f));
+    FindClose(fh);
+    if (cands == 1) { strcpy_s(g_procMaps, lone); return true; }
+    return false;
+}
+// The Linux view on Wine: false where it cannot be read (then the Windows view stands, and g_asView says so).
+static bool LinuxAddressSpace(AddrSpace* out) {
+    if (g_asView < 0) return false;
+    if (!g_procMaps[0] && !FindGameMaps()) { g_asView = -1; return false; }
+    bool whole = false;
+    size_t n = ReadWhole(g_procMaps, g_mapsBuf, kMapsCap, &whole);
+    if (!n) { g_asView = -1; return false; }
+    bool high = false;
+    AddrSpace a = MapsGaps(g_mapsBuf, n, 0xFFFF0000ull, whole, &high);
+    // A mapping above 4 GB: the game runs in Wine's 64-bit WoW64 mode (PROTON_USE_WOW64=1), where the Linux side lives
+    // above 4 GB and Wine holds the low 4 GB for the game, so its gaps there are not the game's room: Windows' view is.
+    if (high) { g_asView = -2; return false; }
+    *out = a;
+    g_asView = 1;
+    return true;
+}
 static AddrSpace AddressSpace() {
     AddrSpace a = { 0, 0, 0 };
 #ifdef SISCO_TEST
     if (g_tAddrSpace.largest) return g_tAddrSpace;
 #endif
+    if (IsWine() && LinuxAddressSpace(&a)) return a;
     uintptr_t p = 0x10000;
     MEMORY_BASIC_INFORMATION m;
     while (p < 0xFFFF0000u && VirtualQuery((void*)p, &m, sizeof(m)) == sizeof(m)) {
@@ -1549,7 +2147,18 @@ static const char* AddrSpaceNote(char* out, size_t cap) {
     out[0] = 0;
     if (!IsWine()) return out;
     AddrSpace a = AddressSpace();
-    _snprintf_s(out, cap, _TRUNCATE, "; address space %llu MB free in %d blocks, the largest %llu MB", a.total >> 20, a.blocks, a.largest >> 20);
+    _snprintf_s(out, cap, _TRUNCATE, "; address space %s%llu MB free in %d blocks, the largest %llu MB",
+                g_asView == 1 ? "(Linux map) " : g_asView == -2 ? "(Windows' view: Wine's 64-bit WoW64 mode) "
+                : g_asView < 0 ? "(Windows' view: the Linux map not found) " : "", a.total >> 20, a.blocks, a.largest >> 20);
+    return out;
+}
+// A brake line's address space: the largest free block the brake decided on, and all that is free (on Wine the number
+// of blocks it lies in too). Walked only when there is a line to write.
+static const char* BrakeSpace(char* out, size_t cap, int64_t lMb) {
+    AddrSpace a = AddressSpace();
+    char blocks[32] = "";
+    if (IsWine()) _snprintf_s(blocks, sizeof(blocks), _TRUNCATE, " in %d blocks", a.blocks);
+    _snprintf_s(out, cap, _TRUNCATE, "largest free %lld MB, free %llu MB%s", lMb, a.total >> 20, blocks);
     return out;
 }
 
@@ -1880,17 +2489,21 @@ static bool InstallEngineSlots(const CoreSites& c, const EnginePlan& p) {
             (p.heapBytes > AUDIO_HEAP_STOCK ? p.heapBytes : AUDIO_HEAP_STOCK) >> 20);
     return true;
 }
-// Once a second: a new peak of engine sounds held at once, over the game's own slots, goes on the log. That is the
-// raise doing its work, and it is what sizes ENGINE_SLOTS for the next version.
-static void EngineSlotTick() {
+// Once a second: the peak of engine sounds held at once, over the game's own slots, goes on the log. That is the raise
+// doing its work, and it is what sizes ENGINE_SLOTS for the next version. At most one line a minute: a new peak inside
+// the minute waits for its end (U1 wrote eight lines in its first two minutes, one per new peak).
+#define ENGINE_PEAK_GAP_MS 60000
+static int g_enginePeakLogged; static int64_t g_enginePeakMs = -ENGINE_PEAK_GAP_MS;
+static void EngineSlotTick(int64_t nowMs) {
     if (!g_engineOn) return;
     uint32_t n = 0; RdU32(g_cs.audioSlots, &n);
     if (n > ENGINE_SLOTS_MAX) n = ENGINE_SLOTS_MAX;
     int held = 0;
     for (uint32_t i = 0; i < n; i++) if (*(volatile uint32_t*)(g_engineTable + 16 * i + 8)) held++;
-    if (held <= g_enginePeak) return;
-    g_enginePeak = held;
-    if (held > g_enginePlan.before) SisLog("audio", "%d engine sounds held at once, more than the %d slots the game had without SISCO", held, g_enginePlan.before);
+    if (held > g_enginePeak) g_enginePeak = held;
+    if (g_enginePeak <= g_enginePlan.before || g_enginePeak <= g_enginePeakLogged || nowMs - g_enginePeakMs < ENGINE_PEAK_GAP_MS) return;
+    g_enginePeakLogged = g_enginePeak; g_enginePeakMs = nowMs;
+    SisLog("audio", "%d engine sounds at once (the game's own %d slots)", g_enginePeak, g_enginePlan.before);
 }
 
 // The engine-sound slots, for the log. The game fills a table at startup by asking its slot file for STREAM_ENGINE_1,
@@ -1910,7 +2523,7 @@ static void AudioNote(const CoreSites& c, char* out, size_t outCap) {
     } __except (EXCEPTION_EXECUTE_HANDLER) { read = false; }
     RdU32(c.audioSlots, &slots);
     if (!read || ins[0] != 0x83 || ins[1] != c.audioCapModRm || heap[0] != 0xBE) {
-        _snprintf_s(out, outCap, _TRUNCATE, "the engine sound slots are not where SISCO reads them: nothing to report");
+        _snprintf_s(out, outCap, _TRUNCATE, "engine sound slots not found where SISCO reads them");
         return;
     }
     uint32_t limit = ins[2], heapBytes = 0;
@@ -1923,6 +2536,13 @@ static void AudioNote(const CoreSites& c, char* out, size_t outCap) {
                         : !BytesEq(c.waveReader, rd, 6) ? ": the slot file's reader was changed after SISCO set it"
                         : summed != (uint32_t)g_enginePlan.fileSlots ? ": the game read another slot file than waveslots_sisco.xml"
                         : ": the game read waveslots_sisco.xml but found fewer engine slots in it";
+        if (slots == (uint32_t)g_enginePlan.slots && summed == (uint32_t)g_enginePlan.fileSlots && BytesEq(c.waveReader, rd, 6)) {
+            char alloc[40] = "";                       // all as SISCO set it: the short form, the heap's own figure only if it differs
+            if ((unsigned)(got >> 20) != heapBytes >> 20) _snprintf_s(alloc, sizeof(alloc), _TRUNCATE, ", %u MiB allocated", (unsigned)(got >> 20));
+            _snprintf_s(out, outCap, _TRUNCATE, "%u engine sound slots in use (the game's own file %d), audio heap %u MiB%s",
+                        slots, g_enginePlan.before, heapBytes >> 20, alloc);
+            return;
+        }
         _snprintf_s(out, outCap, _TRUNCATE, "%u engine sound slots of the %d SISCO declared (the game's own file %d), limit %u; the loader read %u slots "
                     "(SISCO's file has %d), audio heap %u MiB set, %u MiB allocated%s",
                     slots, g_enginePlan.slots, g_enginePlan.before, limit, summed, g_enginePlan.fileSlots, heapBytes >> 20, (unsigned)(got >> 20), why);
@@ -1931,8 +2551,7 @@ static void AudioNote(const CoreSites& c, char* out, size_t outCap) {
     bool stockHeap = heapBytes == AUDIO_HEAP_STOCK || heapBytes == AUDIO_HEAP_STOCK_LOW;
     _snprintf_s(out, outCap, _TRUNCATE, "%u engine sound slots, the game's own limit %u, audio heap %u MiB%s",
                 slots, limit, heapBytes >> 20,
-                limit != AUDIO_SLOTS_STOCK || !stockHeap ? ": another mod has changed them"
-                : slots && slots < limit ? "; a distinct car model past that many near you plays no engine sound" : "");
+                limit != AUDIO_SLOTS_STOCK || !stockHeap ? ": another mod has changed them" : "");
 }
 
 // What the sizing works from: the card's own figure, bounded by the player's -availablevidmem if they set one.
@@ -1966,6 +2585,13 @@ static bool PoolUnmanaged() {
     return mode == 0;
 }
 
+// The car or ped budget for the size line: "car 40 -> 200 MB" where SISCO changed it, "car 200 MB" where it left the value
+// there alone, so the log gives the game's figure beside SISCO's as it does for every other raise (a player asked).
+static const char* TrafficNote(char* out, size_t cap, const char* name, uint32_t was, uint32_t now) {
+    if (was / 1000000 != now / 1000000) _snprintf_s(out, cap, _TRUNCATE, "%s %u -> %u MB", name, was / 1000000, now / 1000000);
+    else _snprintf_s(out, cap, _TRUNCATE, "%s %u MB", name, now / 1000000);
+    return out;
+}
 static void SisSize(int64_t xMb) {
     g_sized = true;
     g_carHeld = false;
@@ -1977,15 +2603,15 @@ static void SisSize(int64_t xMb) {
     SisLog("display", "view distance %u, detail distance %u, car density %u", g_setView, g_setDetail, g_setCars);
     // What the game actually built, read back now that every plugin has loaded and every pool exists. A raise that
     // another plugin undid after SISCO is marked here, and the gate below then holds the budget.
-    if (g_set.limits) { ReadBackRaises(g_cs); SisLog("built", "%s", g_builtNote); }
+    if (g_set.limits) ReadBackRaises(g_cs);         // a raise another plugin undid gets its own site line there
     // g_dxvk is what Direct3DCreate9 found. If the hook never fired it is still -1 here, and vulkan-1.dll answers
     // instead: DXVK loads it when it builds its Direct3D object, long before the world is ready, so by now it is
     // there. Both are facts about the running process, never a guess, and the log says which one decided.
     bool dxvk = g_dxvk == 1 || (g_dxvk < 0 && VulkanLoaded());
-    const char* saw = g_dxvk < 0 ? " (Direct3DCreate9 was never seen; vulkan-1.dll is loaded)" : "";
+    const char* saw = g_dxvk < 0 ? "; Direct3DCreate9 not seen, vulkan-1.dll loaded" : "";
     if (!dxvk) {
-        _snprintf_s(g_sizeNote, sizeof(g_sizeNote), _TRUNCATE, "native Direct3D 9%s: not supported, SISCO requires DXVK (the vulkan.dll in "
-                    "the download); the budget, the car and ped budgets are left alone", g_dxvk < 0 ? " (Direct3DCreate9 was not seen)" : "");
+        _snprintf_s(g_sizeNote, sizeof(g_sizeNote), _TRUNCATE, "native Direct3D 9%s: not supported (SISCO needs DXVK: the download's vulkan.dll); "
+                    "budgets left alone", g_dxvk < 0 ? " (Direct3DCreate9 not seen)" : "");
         SisLog("size", "%s", g_sizeNote);
         return;
     }
@@ -1995,7 +2621,7 @@ static void SisSize(int64_t xMb) {
     g_extraStreaming = g0 != 0x55;
     int tStock = StockFloorMb(g_cs, (int)q, g_extraStreaming);
     int64_t bMb = CardBudgetMb();
-    const char* vmNote = (g_playerVidmemMb > 0 && bMb == g_playerVidmemMb) ? ", bounded by your own -availablevidmem" : "";
+    const char* vmNote = (g_playerVidmemMb > 0 && bMb == g_playerVidmemMb) ? ", your -availablevidmem" : "";
     // A player's own -memrestrict N: the game computes its budget from that figure and never reads the table, so
     // anything written there changes nothing, and the log must not say it did.
     uint32_t mrSlot = 0; RdU32(g_cs.prmMemRestrict, &mrSlot);
@@ -2008,6 +2634,22 @@ static void SisSize(int64_t xMb) {
     int cellMb = (int)(cell >> 20);
     bool keptCell = cellMb > t && cellMb <= T_MAX_MB;
     if (keptCell) t = cellMb;
+    // The game holds the world under its video figure less the render targets (its credit takes the smaller of the
+    // figure and budget + render targets, FINDINGS 8v), so the sizing goes no higher than that either, and the brake's
+    // raises stop there (BrakeStart). The figure is under what the card allows in two ways: a clamp during the first
+    // load (FigTick: the figure in force is under the game's own answer), and an answer that was low from the start
+    // (8av: 2048 MB on a 16 GB card, where the car and ped budgets sized for a budget of 4000 took the world's share
+    // of what the game really held). Until 1.0.5 only the clamp counted.
+    uint64_t figV = 0, figSaved = 0; bool figLow = false, figFloor = false, figClamped = false;
+    if (g_cs.figVideo && RdU64(g_cs.figVideo, &figV) && figV) {
+        int64_t lim = (int64_t)(figV >> 20) - xMb;
+        int lim2 = lim < tStock ? tStock : lim > T_MAX_MB ? T_MAX_MB : (int)lim;
+        if (lim2 < t) {
+            t = lim2; figLow = true; figFloor = lim < tStock;
+            figClamped = RdU64(g_cs.figSaved, &figSaved) && figV < figSaved;
+            if (t < WINE_BUDGET_MAX_MB) wineCap = false;                     // the figure holds it lower than Wine's cap: the line names the figure
+        }
+    }
     // A raised budget is only safe behind the things that were raised to survive it: the two pools it fills, the
     // release queue it overflows on the way out, and the arena it loads through. If any of those was refused the
     // budget stays the game's own, because raising it then would create exactly the load the refused raise existed to
@@ -2025,7 +2667,9 @@ static void SisSize(int64_t xMb) {
                       : PoolUnmanaged() ? (g_dxvk < 0 ? "SISCO never saw Direct3DCreate9, so -managed was never written and the game runs its pool unmanaged"
                                                      : "the game is not using Direct3D managed resources (-unmanaged or -nominimize is set)") : NULL;
     if (needs) t = tStock;
-    g_sizedT = t; g_sizedTStock = tStock; g_sizedX = (int)xMb;
+    g_sizedT = g_sizedT0 = t; g_sizedTStock = tStock; g_sizedX = (int)xMb; g_shrinkTicks = 0;
+    for (int i = 0; i < 3; i++) g_stockFloorQ[i] = StockFloorMb(g_cs, i, g_extraStreaming);   // before the write below
+    g_floorQ = (int)q;
     bool wrote = needs ? false : WriteBudgetAll(g_cs.table, t);
     // Car and ped budgets: the game cut both to a third on a PC with under 1.4 GiB of RAM (0xA3ED0D); then they stay.
     uint32_t car = 0, ped = 0; RdU32(g_cs.vehBudget, &car); RdU32(g_cs.pedBudget, &ped);
@@ -2045,49 +2689,166 @@ static void SisSize(int64_t xMb) {
         if (ped > wantPed) g_ped.fromOther = ped;
         TrafficSet(g_car, car > wantCar ? car : wantCar);
         TrafficSet(g_ped, ped > wantPed ? ped : wantPed);
+        g_car.sized = g_car.target; g_ped.sized = g_ped.target;
     }
     char as[120]; AddrSpaceNote(as, sizeof(as));
-    if (wrote) { BrakeStart(t, tStock); if (IsWine()) BrakeWineLines((int64_t)(wineAs.largest >> 20)); }
+    if (wrote) { BrakeStart(t, tStock, !g_extraStreaming); if (IsWine()) BrakeWineLines((int64_t)(wineAs.largest >> 20)); }
     char held[320] = "";
     if (needs) _snprintf_s(held, sizeof(held), _TRUNCATE, ", LEFT AT THE GAME'S OWN: %s", needs);
     else if (!wrote) strcpy_s(held, " NOT WRITTEN");
+    const char* oneWay = !g_brakeOn || g_brakeCfg.raiseOn ? ""
+                       : g_extraStreaming ? "; brake lowers only (ExtraStreamingMemory)" : "; brake lowers only (Wine, lines lowered)";
+    char figNote[200] = "", figOffNote[120] = "";
+    if (figLow && !needs)
+        _snprintf_s(figNote, sizeof(figNote), _TRUNCATE, figClamped ? "; the game's video figure already lowered to %llu MB by a failed create: %s"
+                                                                    : "; the game's own video figure is %llu MB: %s", figV >> 20,
+                    figFloor ? "the game's own budget holds" : "the budget stays under it less the render targets");
+    if (g_figOff[0]) _snprintf_s(figOffNote, sizeof(figOffNote), _TRUNCATE, "; memory figures not watched (%s)", g_figOff);
+    char carNote[40], pedNote[40], budNote[48];
+    // "budget 800 -> 4000 MB": the game's own for the texture quality in force, then SISCO's, as every raise reads.
+    if (t != tStock) _snprintf_s(budNote, sizeof(budNote), _TRUNCATE, "budget %d -> %d MB", tStock, t);
+    else _snprintf_s(budNote, sizeof(budNote), _TRUNCATE, "budget %d MB%s", t, needs ? "" : ", the game's own");   // "LEFT AT THE GAME'S OWN" says it then
+    // A fragmented layout on Wine without Proton's WoW64 mode: the one thing a player can do about it, behind the layout.
+    const char* wow64 = IsWine() && (int64_t)(wineAs.largest >> 20) < WINE_ROOMY_MB && !ProtonWow64() && g_asView != -2
+                        ? " (on Proton, PROTON_USE_WOW64=1 leaves the game far more)" : "";
     _snprintf_s(g_sizeNote, sizeof(g_sizeNote), _TRUNCATE,
-                "DXVK%s; card budget %lld MB%s, render targets %lld MB, others %d MB%s: budget %d MB (the card allows %d, the game's "
-                "own %d%s%s)%s%s; car %u MB, ped %u MB%s%s%s", saw, bMb, vmNote, xMb, OtherMb(xMb),
-                g_extraStreaming ? ", FusionFix's ExtraStreamingMemory assumed (the credit function is hooked)" : "", t, tVram,
-                tStock, wineCap ? "; 2000 is the most SISCO asks for on Wine with a layout this fragmented, in this version" : "",
-                keptCell ? "; a larger value already in the table kept" : "", held,
-                needs || !g_cs.poolMode ? "" : "; pool managed (read back from the game)",
-                g_car.target / 1000000, g_ped.target / 1000000,
+                "%s (card %lld MB%s, render targets %lld MB, the card allows %d)%s%s%s%s%s%s; %s, %s%s%s%s%s%s%s%s",
+                budNote, bMb, vmNote, xMb, tVram,
+                g_extraStreaming ? "; ExtraStreamingMemory on" : "",
+                wineCap ? "; capped at 2000 on Wine (fragmented address space)" : "",
+                keptCell && !needs ? (figLow ? "; a larger table value, lowered to the game's figure" : "; a larger table value kept") : "",
+                figNote, held,
+                needs || !g_cs.poolMode ? "" : "; pool managed",
+                TrafficNote(carNote, sizeof(carNote), "car", car, g_car.target), TrafficNote(pedNote, sizeof(pedNote), "ped", ped, g_ped.target),
                 lowRam ? " (the game's low-memory values kept)"
-                       : g_carHeld ? " (car held where the game's own VehicleStruct pool can use it)" : "",
-                car > CarPedFor(CAR_STOCK, CAR_FULL, t, tStock) || ped > CarPedFor(PED_STOCK, PED_FULL, t, tStock) ? " (a larger value another mod set kept)" : "", as);
+                       : g_carHeld ? " (car held at 120 MB: VehicleStruct pool not raised)" : "",
+                car > CarPedFor(CAR_STOCK, CAR_FULL, t, tStock) || ped > CarPedFor(PED_STOCK, PED_FULL, t, tStock) ? " (another mod's larger value kept)" : "",
+                oneWay, figOffNote, as, wow64, saw);
     SisLog("size", "%s", g_sizeNote);
 }
-// The render targets grew (the player raised the resolution): lower the budget to what the card allows now. Never raised.
+// The game's own budget for the texture quality in force, read at sizing before SISCO wrote the table.
+static int OwnFloor() {
+    return g_floorQ >= 0 && g_floorQ <= 2 && g_stockFloorQ[g_floorQ] > 0 ? g_stockFloorQ[g_floorQ] : g_sizedTStock;
+}
+// The brake's floor: the game's own budget for the texture quality in force, never above what the card allows now.
+static int BrakeFloorNow() {
+    int f = OwnFloor();
+    return f < g_sizedT ? f : g_sizedT;
+}
+// The render targets changed size for good (the player changed the resolution). Larger: lower the budget to what the
+// card allows now, never under the game's own for the texture quality in force (as a sizing at that quality gives);
+// the brake's raises stop at the same figure (at a larger X the card allows about 1.5 MB less budget per
+// MB of X, while a level measured in V only moves 1 MB). Smaller again, and held BRAKE_X_TICKS ticks (a device reset
+// dips the set for one tick, T18): give back what the card allows now, never past the sizing's own figure nor a followed
+// clamp's cap. The budget itself comes back only where the brake has not held: there the card was what lowered it; where
+// it has held, the address space is the limit and the brake's ceiling rules (a smaller set never raises it). No give
+// back while a load builds: its sets are the loading screen's, not a resolution (BrakeX).
 static void SisResize(int64_t nowMs, int64_t xMb) {
-    if (xMb - g_sizedX < 8) return;
     int64_t bMb = CardBudgetMb();
-    int t = bMb > 0 ? SizeBudget(bMb, xMb, g_sizedTStock, g_extraStreaming, NULL) : g_sizedTStock;
-    g_sizedX = (int)xMb;
-    if (!g_brakeOn || t >= g_brakeSt.t) return;
+    if (xMb - g_sizedX >= 8) {
+        g_shrinkTicks = 0;
+        int t = bMb > 0 ? SizeBudget(bMb, xMb, OwnFloor(), g_extraStreaming, NULL) : OwnFloor();
+        g_sizedX = (int)xMb;
+        if (t < g_sizedT) { g_sizedT = t; if (g_brakeCfg.capMb <= 0 || t < g_brakeCfg.capMb) g_brakeCfg.capMb = t; }   // never lifts a followed clamp's cap
+        if (!g_brakeOn || t >= g_brakeSt.t) return;
+        int before = g_brakeSt.t;
+        if (!WriteBudgetAll(g_cs.table, t)) return;
+        g_brakeSt.t = t;
+        g_brakeCfg.floorMb = BrakeFloorNow();
+        SisLog("size", "render targets now %lld MB at %lld s: budget %d -> %d MB", xMb, nowMs / 1000, before, t);
+        TrafficFollow(t, g_sizedTStock);
+        return;
+    }
+    if (g_sizedX - xMb < 8 || g_ldUp || g_ldPending || g_ldEdgeMs || g_ldSettleMs) { g_shrinkTicks = 0; return; }   // not smaller, or a load's set
+    if (xMb != g_shrinkX) { g_shrinkX = xMb; g_shrinkTicks = 0; }
+    if (++g_shrinkTicks < BRAKE_X_TICKS) return;
+    g_shrinkTicks = 0; g_sizedX = (int)xMb;
+    int t = bMb > 0 ? SizeBudget(bMb, xMb, OwnFloor(), g_extraStreaming, NULL) : OwnFloor();
+    if (t > g_sizedT0) t = g_sizedT0;
+    if (t <= g_sizedT) return;                                               // the card never lowered it: nothing to give back
+    g_sizedT = t;
+    int cap = g_brakeCfg.clampCapMb > 0 && g_brakeCfg.clampCapMb < t ? g_brakeCfg.clampCapMb : t;
+    if (g_brakeCfg.capMb > 0 && g_brakeCfg.capMb < cap) g_brakeCfg.capMb = cap;
+    if (!g_brakeOn) return;
+    g_brakeCfg.floorMb = BrakeFloorNow();
+    if (g_brakeSt.held || g_brakeSt.t >= cap) {
+        SisLog("size", "render targets now %lld MB at %lld s: the card allows %d MB again; budget stays %d MB%s", xMb, nowMs / 1000, t, g_brakeSt.t,
+               g_brakeSt.held ? " (brake holding)" : "");
+        return;
+    }
     int before = g_brakeSt.t;
-    if (!WriteBudgetAll(g_cs.table, t)) return;
-    g_brakeSt.t = t;
-    if (g_brakeCfg.floorMb > t) g_brakeCfg.floorMb = t;
-    SisLog("size", "render targets now %lld MB at %lld s: budget %d -> %d MB", xMb, nowMs / 1000, before, t);
-    TrafficFollow(t, g_sizedTStock);
+    if (!WriteBudgetAll(g_cs.table, cap)) return;
+    g_brakeSt.t = cap;
+    SisLog("size", "render targets now %lld MB at %lld s: budget %d -> %d MB (the card allows it again%s)", xMb, nowMs / 1000, before, cap,
+           cap < t ? ", up to the game's clamp" : "");
+    TrafficRaise(cap, g_sizedTStock);
+}
+// The texture quality the game uses changed: the brake's floor follows the game's own budget for it (BrakeFloorNow).
+// The game applies a change at its start, and from its main menu before a game is loaded; one made in the pause menu is
+// saved for the next start (1.0.8.0 0x477300 writes this value only when its argument is set: 1 at start, from the
+// frontend's apply only while 0x10FC0B4 is set, which a game start clears), so in play this runs only after such a
+// return to the main menu. The game's own budget reads the same value (0x40F1E1). Where the
+// brake has not held and the budget is under that, the budget comes up to it, as a sizing at that quality gives a card
+// that allows less (the second audit, brake-4: a small card sized at low stayed under the unmodded game's budget at high
+// for the session); a followed clamp does not keep it lower, its follow never goes under the game's own either. Where
+// the brake has held, a budget under the new floor stays there (the address space is short) and later steps stop at the
+// floor. A lower quality moves only the floor.
+static void BrakeQualityTick(int64_t nowMs) {
+    if (!g_brakeOn || !g_cs.quality) return;
+    uint32_t q = 2; if (!RdU32(g_cs.quality, &q)) return; if (q > 2) q = 2;
+    if ((int)q == g_floorQ) return;
+    int own = g_stockFloorQ[q] > 0 ? g_stockFloorQ[q] : g_sizedTStock, from = g_brakeSt.t;
+    bool up = !g_brakeSt.held && from < own;
+    if (up && !WriteBudgetAll(g_cs.table, own)) return;                     // not written: tried again next tick
+    int before = g_brakeCfg.floorMb;
+    g_floorQ = (int)q;
+    if (up) {
+        g_brakeSt.t = own;
+        if (g_sizedT < own) g_sizedT = own;
+        if (g_sizedT0 < own) g_sizedT0 = own;
+        if (g_brakeCfg.capMb > 0 && g_brakeCfg.capMb < own) g_brakeCfg.capMb = own;
+        TrafficRaise(own, g_sizedTStock);
+    }
+    g_brakeCfg.floorMb = BrakeFloorNow();
+    static const char* const kQ[3] = { "low", "medium", "high" };
+    if (up) SisLog("brake", "texture quality %s at %lld s: budget %d -> %d MB (the game's own), brake floor %d -> %d MB",
+                   kQ[q], nowMs / 1000, from, own, before, g_brakeCfg.floorMb);
+    else SisLog("brake", "texture quality %s at %lld s: brake floor %d -> %d MB%s", kQ[q], nowMs / 1000,
+                before, g_brakeCfg.floorMb, g_brakeSt.t >= g_brakeCfg.floorMb ? "" : "; budget stays under it (brake holding)");
 }
 // What the skip did, when it ends: how many presents were not made, and since when.
-static void PresentLine(int64_t nowMs, const char* where) {
-    SisLog("present", "presents go out again, %s: %ld were not made in the %lld s since the loading screen went up", where, g_skippedPresents,
-           g_ldUpMs > 0 ? (nowMs - g_ldUpMs) / 1000 : nowMs / 1000);
+// A load without a loading screen that the hook throttled is over: one line a second at most, for the last episode,
+// saying how many more ended since the last line. The frames and presents are the whole episode's: its last window,
+// where the game's own frames came back, is throttled too (the rule decides at a window's end).
+static LONG g_rpLogged;
+static void RepeatLine() {
+    LONG done = g_rpDone;
+    if (done == g_rpLogged) return;
+    LONG more = done - g_rpLogged - 1;
+    g_rpLogged = done;
+    LONG ms = g_rpDoneMs;
+    char also[64] = "";
+    if (more > 0) _snprintf_s(also, sizeof(also), _TRUNCATE, " (+%ld more just before)", more);
+    SisLog("present", "taxi-skip throttle: %ld.%ld s, %ld game frames, %ld presents skipped%s", ms / 1000, (ms % 1000) / 100,
+           (long)g_rpDoneFrames, (long)g_rpDoneSkipped, also);
 }
-// The load line: how long the world took to build after the player appeared, to the render targets' last change.
+// A load's presents skip has ended: when (after the player appeared) and how many were not made, for the load's line.
+static void LoadSkipEnded(int64_t nowMs) {
+    if (g_ldSkipEndS >= 0 || !g_ldEdgeMs) return;
+    g_ldSkipEndS = (nowMs - g_ldEdgeMs) / 1000; g_ldSkipped = g_skippedPresents;
+}
+// The load's one line, at its verdict: how long the world took to build after the player appeared (to the render
+// targets' last change), the loading screen before it, the render targets at the player and at the end, the presents
+// not made. A load that never reaches it (a crash, a new loading screen) leaves only its "loading screen at" line.
 static void LoadVerdict(int64_t nowMs, bool ceiling) {
     g_loadBuildS = (ceiling ? nowMs - g_ldEdgeMs : g_ldChangeMs - g_ldEdgeMs) / 1000;
-    if (ceiling) SisLog("load", "the render targets never held for %d s in the %lld s since the player appeared: the build's end could not be seen", LOAD_STEADY_TICKS, g_loadBuildS);
-    else SisLog("load", "the world built in %lld s after the player appeared", g_loadBuildS);
+    char x0[24] = "none", x1[24] = "none", skip[64] = "";
+    if (g_ldEdgeX >= 0) _snprintf_s(x0, sizeof(x0), _TRUNCATE, "%lld", g_ldEdgeX);
+    if (g_ldX >= 0) _snprintf_s(x1, sizeof(x1), _TRUNCATE, "%lld", g_ldX);
+    if (g_ldSkipEndS >= 0) _snprintf_s(skip, sizeof(skip), _TRUNCATE, ", %ld presents skipped until +%lld s", (long)g_ldSkipped, g_ldSkipEndS);
+    if (ceiling) SisLog("load", "world build end not seen in %lld s after the player (render targets never held %d s; loading screen %lld s, "
+                        "render targets %s -> %s MB%s)", g_loadBuildS, LOAD_STEADY_TICKS, g_ldScreenS, x0, x1, skip);
+    else SisLog("load", "world built %lld s after the player (loading screen %lld s, render targets %s -> %s MB%s)", g_loadBuildS, g_ldScreenS, x0, x1, skip);
 }
 // Once a second from the worker, before the sizing: the load being timed, and the presents while its world builds.
 static void LoadTick(int64_t nowMs, bool loadingUp, bool playerIn, bool ready, int64_t xMb) {
@@ -2097,7 +2858,7 @@ static void LoadTick(int64_t nowMs, bool loadingUp, bool playerIn, bool ready, i
         if (!g_ldUp) {
             g_ldUpMs = nowMs; g_ldEdgeMs = 0;
             g_skippedPresents = 0; g_lastShownMs = 0;
-            SisLog("loading", "a loading screen is up, %lld s after launch", nowMs / 1000);
+            SisLog("load", "loading screen at %lld s", nowMs / 1000);
         }
         if (g_swapVtblHooked) { g_skipRtEnd = 0; g_showMs = PRESENT_SHOW_LOADING_MS; g_presentSkip = 1; }
         g_ldUp = true; g_ldPending = false; g_menuTicks = 0;
@@ -2106,11 +2867,15 @@ static void LoadTick(int64_t nowMs, bool loadingUp, bool playerIn, bool ready, i
     if (g_ldUp) { g_ldUp = false; g_ldPending = true; }
     if (g_ldPending) {
         if (!playerIn) {                 // the flag is down and nobody is in the world: the player can follow a tick later, or this is the menu
-            if (++g_menuTicks >= 2 && g_presentSkip) { g_presentSkip = 0; PresentLine(nowMs, "the loading screen came down to the menu"); }
+            if (++g_menuTicks >= 2 && g_presentSkip) {
+                g_presentSkip = 0;
+                SisLog("load", "menu at %lld s, %lld s after the loading screen: %ld presents skipped", nowMs / 1000,
+                       g_ldUpMs > 0 ? (nowMs - g_ldUpMs) / 1000 : nowMs / 1000, (long)g_skippedPresents);
+            }
             return;
         }
         g_ldPending = false; g_menuTicks = 0;
-        g_ldEdgeMs = g_worldMs = g_ldChangeMs = nowMs;
+        g_ldEdgeMs = g_ldSettleMs = g_worldMs = g_ldChangeMs = nowMs;
         g_ldX = ready ? xMb : -1; g_ldSteady = 0; g_ldVerdict = false; g_loadN++;
         if (g_swapVtblHooked) {
             if (!g_presentSkip) { g_skippedPresents = 0; g_lastShownMs = 0; }
@@ -2121,11 +2886,15 @@ static void LoadTick(int64_t nowMs, bool loadingUp, bool playerIn, bool ready, i
         }
         g_worldLogged = true;
         // The game's loading flag drops when the player entity exists, while the world still streams in around it
-        // and the visible loading screen stays up until it has: the phase timed from here is that build.
-        SisLog("world", "the player exists and the game's loading flag is down, %lld s after the loading screen went up; the world builds from here (the loading screen may still show); render targets %lld MB%s",
-               g_ldUpMs > 0 ? (nowMs - g_ldUpMs) / 1000 : 0, ready ? xMb : 0, ready ? "" : " (not built yet)");
+        // and the visible loading screen stays up until it has: the phase timed from here is that build. Where it
+        // started goes on the load's one line, at the verdict (LoadVerdict).
+        g_ldScreenS = g_ldUpMs > 0 ? (nowMs - g_ldUpMs) / 1000 : 0; g_ldEdgeX = ready ? xMb : -1; g_ldSkipEndS = -1; g_ldSkipped = 0;
         return;
     }
+    // Judged, the set can still be a stage short of the finished one: 765 MB held 5 to 12 ticks after the player appeared
+    // before 797 at 4K (the second audit, brake-3), and read as it is that was a resolution drop that lowered the ceiling.
+    // The last finished set stands in (BrakeX, SisResize) until the set is back, or LOAD_CEILING_MS after the edge.
+    if (g_ldSettleMs && !g_ldEdgeMs && ((ready && xMb > g_sizedX - BRAKE_X_MB) || nowMs >= g_ldSettleMs + LOAD_CEILING_MS)) g_ldSettleMs = 0;
     if (!g_ldEdgeMs) return;
     int64_t x = ready ? xMb : -1;
     if (x != g_ldX) { g_ldX = x; g_ldSteady = 0; g_ldChangeMs = nowMs; }
@@ -2142,17 +2911,11 @@ static void LoadTick(int64_t nowMs, bool loadingUp, bool playerIn, bool ready, i
     // SKIP_MAX_STEADY ticks (a machine whose first stage was never seen reads as part-built for far longer), or the
     // ceiling: presents must go out again once the game is on screen.
     LONG endedRt = InterlockedExchange(&g_skipEndedRt, 0);
-    if (endedRt) {
-        char where[128];
-        _snprintf_s(where, sizeof(where), _TRUNCATE, "on the first present with the world's render targets (%ld MB), %lld s after the player appeared",
-                    endedRt, (nowMs - g_ldEdgeMs) / 1000);
-        PresentLine(nowMs, where);
-    }
+    if (endedRt) LoadSkipEnded(nowMs);
     bool past = x >= RT_FINISHED_MIN_MB && g_rtMin > 0 && x >= 2 * g_rtMin;
     if (g_presentSkip && ((past && g_ldSteady >= 1) || (x >= RT_PART_BUILT_MB && g_ldSteady >= 2) || (x >= RT_FINISHED_MIN_MB && g_ldSteady >= SKIP_MAX_STEADY) || ceiling)) {
         g_presentSkip = 0;
-        char where[64]; _snprintf_s(where, sizeof(where), _TRUNCATE, "%lld s after the player appeared", (nowMs - g_ldEdgeMs) / 1000);
-        PresentLine(nowMs, where);
+        LoadSkipEnded(nowMs);
     }
     if (!g_ldVerdict && (built || ceiling)) {
         g_ldVerdict = true;
@@ -2161,14 +2924,131 @@ static void LoadTick(int64_t nowMs, bool loadingUp, bool playerIn, bool ready, i
         g_ldEdgeMs = 0;                                                     // this load is done with
     }
 }
+// Once a second: the taxi throttle trusts the frame count only while it is seen to move. It arms once the count has
+// moved by a plausible step on FRAME_MOVING_TICKS ticks in a row in play (a world loaded, no loading screen, no menu, the
+// player in the world), saying so the first time, and disarms when the
+// count has stood still for FRAME_STUCK_TICKS ticks in play while presents went out: a stopped count (another mod's hook
+// on the update, or FusionFix's between its two writes) would otherwise read as one screen shown over and over and hold
+// normal play to 30 presents a second. A load without a loading screen still draws 2 to 7 game frames a second (T18),
+// so the count moves through it. It arms again when the count moves.
+#define FRAME_STUCK_TICKS 5
+#define FRAME_STUCK_PRESENTS 30     // presents asked in a tick for a still count to count: fewer and the game is not drawing
+#define FRAME_MOVING_TICKS 2       // ticks in a row the count must move before the throttle trusts it (the second audit, present-2: the
+                                   // game also writes the count outside its update, at a save load, which once armed a stopped count)
+#define FRAME_STEP_MAX 10000       // a tick's step larger than this (or a count set back) is such a write: neither moving nor still
+static uint32_t g_flFrame; static LONG g_flPresents; static bool g_flSampled, g_flDisarmed, g_flArmedOnce; static int g_flStuck, g_flMoved, g_flLines;
+static void FrameLiveTick(int64_t nowMs, bool loadingUp, bool playerIn) {
+    if (!g_cs.frame) return;
+    uint32_t f = *(volatile uint32_t*)g_cs.frame; LONG p = g_presentCalls;
+    uint32_t df = f - g_flFrame; LONG dp = p - g_flPresents;
+    bool sampled = g_flSampled;
+    g_flFrame = f; g_flPresents = p; g_flSampled = true;
+    bool menu = g_cs.menu && *(volatile uint8_t*)g_cs.menu;
+    if (!sampled || !g_worldLogged || loadingUp || !playerIn || menu || df > FRAME_STEP_MAX) { g_flStuck = g_flMoved = 0; return; }
+    if (df) {
+        g_flStuck = 0;
+        if (g_rpArmed || ++g_flMoved < FRAME_MOVING_TICKS) return;
+        g_rpArmed = true; g_flMoved = 0;
+        if (!g_flArmedOnce) {
+            g_flArmedOnce = true;
+            SisLog("present", "taxi-skip throttle on at %lld s", nowMs / 1000);
+        } else if (g_flDisarmed && g_flLines < 4) {
+            g_flLines++;
+            SisLog("present", "taxi-skip throttle on again at %lld s (the frame count moves)", nowMs / 1000);
+        }
+        return;
+    }
+    g_flMoved = 0;
+    if (dp < FRAME_STUCK_PRESENTS) { g_flStuck = 0; return; }
+    if (++g_flStuck < FRAME_STUCK_TICKS || (!g_rpArmed && g_flDisarmed)) return;   // not yet, or off already and said so
+    g_rpArmed = false; g_flDisarmed = true;
+    if (g_flLines < 4) {
+        g_flLines++;
+        SisLog("present", "taxi-skip throttle off at %lld s: the frame count stood still %d s at %ld presents/s", nowMs / 1000, FRAME_STUCK_TICKS, (long)dp);
+    }
+}
+// Once a second: the game's memory figures (the comment at D_FIG_VIDEO). A device reset writes the system figure 0 for a
+// moment and puts both back; a clamp lowers one or both, and never to 0. Any other change must read the same on two
+// ticks before it counts: the game stores each figure as two dwords, and a single read can land between them.
+static void FigTick(int64_t nowMs, bool loadingUp, int64_t xMb, int64_t lMb) {
+    g_fig.resetTick = false;
+    if (!g_cs.figVideo) return;
+    uint64_t v = 0, s = 0;
+    if (!RdU64(g_cs.figVideo, &v) || !RdU64(g_cs.figSystem, &s) || !v) return;   // before the game's lazy init, or mid-reset
+    if (s == 0) { g_fig.blips++; g_fig.resetTick = true; g_fig.pending = false; return; }
+    if (!g_fig.accepted) {
+        g_fig.accepted = true; g_fig.video = v; g_fig.system = s; RdU64(g_cs.figSaved, &g_fig.saved);
+        char own[48] = "";                               // the game's saved answer, only where it is not the figure in force
+        if (g_fig.saved != v) _snprintf_s(own, sizeof(own), _TRUNCATE, " (its own answer %llu MB)", g_fig.saved >> 20);
+        // The figure SISCO asked for and the game did not take (another mod answers for the game, or the option was
+        // not read): a bug report then shows why the budget stays under the game's figure (the size line).
+        char asked[64] = "";
+        if (g_vidmemSetMb > 0 && g_fig.saved && (g_fig.saved >> 20) != (uint64_t)g_vidmemSetMb)
+            _snprintf_s(asked, sizeof(asked), _TRUNCATE, " (not the %d MB SISCO set)", g_vidmemSetMb);
+        SisLog("memory", "game figures: video %llu MB%s%s, system %llu MB", v >> 20, own, asked, s >> 20);
+        return;
+    }
+    if (v == g_fig.video && s == g_fig.system) { g_fig.pending = false; return; }
+    if (!g_fig.pending || v != g_fig.pendV || s != g_fig.pendS) { g_fig.pending = true; g_fig.pendV = v; g_fig.pendS = s; return; }
+    g_fig.pending = false;
+    uint64_t v0 = g_fig.video, s0 = g_fig.system;
+    g_fig.video = v; g_fig.system = s;
+    bool vDown = v < v0, sDown = s < s0;
+    if (!vDown && !sDown) {
+        g_fig.restores++;
+        if (g_fig.clampMs)
+            SisLog("memory", "figures restored at a device reset, %lld s after the clamp: video %llu MB, system %llu MB (%d clamp%s so far)",
+                   (nowMs - g_fig.clampMs) / 1000, v >> 20, s >> 20, g_fig.clamps, g_fig.clamps == 1 ? "" : "s");
+        else
+            SisLog("memory", "figures restored at a device reset at %lld s (already lowered at SISCO's first read): video %llu MB, system %llu MB",
+                   nowMs / 1000, v >> 20, s >> 20);
+        return;
+    }
+    g_fig.clamps++; g_fig.clampMs = nowMs;
+    if (vDown) {                                                             // BrakeTick follows it once loading is down
+        g_fig.follow = true;
+        if (!g_fig.followV || v < g_fig.followV) g_fig.followV = v;
+    }
+    if (g_fig.clamps > FIG_LINES_MAX) {                                      // the follow's own lines stop here too (BrakeTick)
+        if (g_fig.clamps == FIG_LINES_MAX + 1) SisLog("memory", "clamp again at %lld s: from here clamps are counted, not logged (nor the brake's follows)", nowMs / 1000);
+        else if (g_fig.clamps % 10 == 0)
+            SisLog("memory", "%d clamps so far (at %lld s: video %llu MB, system %llu MB)", g_fig.clamps, nowMs / 1000, v >> 20, s >> 20);
+        return;
+    }
+    char figs[160];
+    if (vDown && sDown)
+        _snprintf_s(figs, sizeof(figs), _TRUNCATE, "video %llu -> %llu MB, system %llu -> %llu MB", v0 >> 20, v >> 20, s0 >> 20, s >> 20);
+    else if (vDown) _snprintf_s(figs, sizeof(figs), _TRUNCATE, "video %llu -> %llu MB", v0 >> 20, v >> 20);
+    else _snprintf_s(figs, sizeof(figs), _TRUNCATE, "system %llu -> %llu MB", s0 >> 20, s >> 20);
+    uint64_t vb = 0, sb = 0, cv = 0, cs = 0;
+    RdU64(g_cs.cacheV, &vb); RdU64(g_cs.cacheS, &sb); RdU64(g_cs.cachedV, &cv); RdU64(g_cs.cachedS, &cs);
+    char as[120] = "largest free not measured";
+    if (lMb >= 0) BrakeSpace(as, sizeof(as), lMb);
+    char brk[80] = "no brake";
+    if (g_brakeOn) _snprintf_s(brk, sizeof(brk), _TRUNCATE, "brake %d MB%s, ceiling %d MB", g_brakeSt.t, g_brakeSt.held ? ", held" : "", g_brakeSt.ceiling);
+    char notes[240] = "";
+    if (s < 0xA0000000ull) strcat_s(notes, "; the game's address-space limit (free less 288 MB) now on");
+    if (s < 0x59999980ull && !GameRunsRow15(g_cs, g_extraStreaming)) strcat_s(notes, "; the game's low-memory budget row (164, 200, 381 MB) now on");
+    // The kind is told only by which figures moved: the game lowers each only where what it holds is under it, and a
+    // system-memory failure (E_OUTOFMEMORY) takes the system-only path too (0x410AE7), so this is what was seen.
+    SisLog("memory", "clamp at %lld s (%s): %s after a failed Direct3D create (%s); held until a device reset (V %llu MB, S %llu MB, "
+           "reuse %llu/%llu MB, render targets %lld MB, %s; %s; clamp %d)%s", nowMs / 1000, loadingUp ? "a loading screen up" : "in play", figs,
+           vDown && sDown ? "both moved: a managed texture"
+                          : vDown ? "video only: a DEFAULT resource, or a managed texture already under its system figure"
+                                  : "system only: a system-memory texture, a managed texture already under its video figure, or out of system memory",
+           vb >> 20, sb >> 20, cv >> 20, cs >> 20, xMb, as, brk, g_fig.clamps, notes);
+}
 // Once a second, from the worker thread. lMb: the largest free block of the address space, in MB.
 static void SisTick(int64_t nowMs, int64_t lMb) {
     int64_t xMb = 0;
     uint32_t loading = 0; RdU32(g_cs.loading, &loading);
     bool loadingUp = (loading & 0xFF) != 0;
-    EngineSlotTick();
+    EngineSlotTick(nowMs);
     bool ready = WorldReady(&xMb), playerIn = PlayerInWorld();
     LoadTick(nowMs, loadingUp, playerIn, ready, xMb);
+    FrameLiveTick(nowMs, loadingUp, playerIn);
+    RepeatLine();
+    FigTick(nowMs, loadingUp, ready ? xMb : 0, lMb);
     if (!g_sized) {
         // Size only when the streamer is up, the player is in the world (not at the main menu), the loading screen is
         // down and the render targets have held the same size for SETTLE_TICKS seconds: they are created in stages,
@@ -2186,8 +3066,10 @@ static void SisTick(int64_t nowMs, int64_t lMb) {
         return;
     }
     TrafficGuard(g_ped); TrafficGuard(g_car);
-    if (!g_brakeOn || !ready) return;
+    if (!g_brakeOn) return;
+    if (!ready) { BrakePause(nowMs); return; }
     SisResize(nowMs, xMb);
+    BrakeQualityTick(nowMs);
     uint64_t v = 0;
     if (!RdU64(g_cs.cacheV, &v)) return;
     BrakeTick(g_cs.table, nowMs, (int64_t)(v >> 20), xMb, lMb, loadingUp);
@@ -2359,6 +3241,10 @@ static CoreSites Sites1080() {
     c.setView = VA(D_SET_VIEW); c.setDetail = VA(D_SET_DETAIL); c.setCars = VA(D_SET_CARS);
     c.table = VA(D_TABLE); c.quality = VA(D_QUALITY); c.rt0 = VA(D_RT0); c.cacheV = VA(D_CACHE) + C_V;
     c.streamerN = VA(D_STREAMER) + 4; c.loading = VA(D_LOADING); c.vehBudget = VA(D_VEH_BUDGET); c.pedBudget = VA(D_PED_BUDGET);
+    c.frame = FrameCountAt(VA(A_FRAME_COUNT), VA(D_FRAME), 7, VA(A_FRAME_READ), &c.frameHooked); c.menu = MenuByteAt(VA(A_MENU_CHECK), VA(D_MENU));
+    FigSites(c.figVideo, c.figSystem, c.figSaved, VA(A_FIG_RESTORE), A_FIG_RESTORE, VA(A_FIG_GATE), A_FIG_GATE,
+             VA(D_FIG_VIDEO), VA(D_FIG_SYSTEM), VA(D_FIG_SAVED), VA(D_FIG_DEAD));
+    c.cacheS = VA(D_CACHE) + C_S; c.cachedV = VA(D_CACHE) + C_CACHED_V; c.cachedS = VA(D_CACHE) + C_CACHED_S;
     c.playerInfo = VA(D_PLAYERINFO);
     c.gafm = VA(A_GAFM);
     c.audioSlotCap = VA(A_AUDIO_SLOT_CAP); c.audioHeap = VA(A_AUDIO_HEAP); c.audioSlots = VA(D_AUDIO_SLOTS);
@@ -2392,6 +3278,10 @@ static CoreSites SitesCe() {
     c.setView = VA(CE_D_SET_VIEW); c.setDetail = VA(CE_D_SET_DETAIL); c.setCars = VA(CE_D_SET_CARS);
     c.table = VA(CE_D_TABLE); c.quality = VA(CE_D_QUALITY); c.rt0 = VA(CE_D_RT0); c.cacheV = VA(CE_D_CACHE) + C_V;
     c.streamerN = VA(CE_D_STREAMER) + 4; c.loading = VA(CE_D_LOADING); c.vehBudget = VA(CE_D_VEH_BUDGET); c.pedBudget = VA(CE_D_PED_BUDGET);
+    c.frame = FrameCountAt(VA(CE_A_FRAME_COUNT), VA(CE_D_FRAME), 6, VA(CE_A_FRAME_READ), &c.frameHooked); c.menu = MenuByteAt(VA(CE_A_MENU_CHECK), VA(CE_D_MENU));
+    FigSites(c.figVideo, c.figSystem, c.figSaved, VA(CE_A_FIG_RESTORE), CE_A_FIG_RESTORE, VA(CE_A_FIG_GATE), CE_A_FIG_GATE,
+             VA(CE_D_FIG_VIDEO), VA(CE_D_FIG_SYSTEM), VA(CE_D_FIG_SAVED), VA(CE_D_FIG_DEAD));
+    c.cacheS = VA(CE_D_CACHE) + C_S; c.cachedV = VA(CE_D_CACHE) + C_CACHED_V; c.cachedS = VA(CE_D_CACHE) + C_CACHED_S;
     c.playerInfo = VA(CE_D_PLAYERINFO);
     c.gafm = VA(CE_A_GAFM);
     c.audioSlotCap = VA(CE_A_AUDIO_SLOT_CAP); c.audioHeap = VA(CE_A_AUDIO_HEAP); c.audioSlots = VA(CE_D_AUDIO_SLOTS);
@@ -2401,36 +3291,45 @@ static CoreSites SitesCe() {
     return c;
 }
 // The two builds SISCO knows: 1.0.8.0 and the Complete Edition 1.2.0.59. Anything else: log why and change nothing. Each
-// is named by its PE header and then by code that build alone has, which on the Complete Edition also proves its
-// encrypted megabyte has already been decrypted (both anchors live inside it and neither holds a relocated address).
+// is named by code that build alone has, which on the Complete Edition also proves its encrypted megabyte has already
+// been decrypted (both anchors live inside it and neither holds a relocated address). The PE header does not decide:
+// until 1.0.5 it did, first, and a GTAIV.exe with the same code behind another header (one that starts without the
+// launcher: two players, 2026-10-02, who got SISCO going by editing the header back) was refused. The header is read
+// for the log only: a stock one is not mentioned, any other is named on the first line, and where the code is not what
+// SISCO read it picks what there is to say. What makes a write safe was never the build's name: every site is checked
+// byte for byte on its own before it is touched.
 static const char* g_buildName = "";
+static char g_buildHdr[80] = "";        // " (exe header not stock: ...)" behind the build's name, or nothing
 static CoreSites g_buildSites;
 static bool IsKnownBuild(char* why, size_t cap) {
     IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)g_base;
     IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(g_base + dos->e_lfanew);
     uint32_t soi = nt->OptionalHeader.SizeOfImage, tds = nt->FileHeader.TimeDateStamp;
-    if (soi == 0x18B2000u && tds == 0x57C6FB75u) {
-        static const uint8_t resc[7] = { 'R', 'E', 'S', 'C', '1', '0', 0 };
-        if (!BytesEq(VA(A_RESC10_STR), resc, 7)) { _snprintf_s(why, cap, _TRUNCATE, "RESC10 string not at 0xEBDD00"); return false; }
-        // The arena vtable's first slot holds 0x4555D0 in the file; rebase it the same way the loader did.
-        uint32_t slot0 = 0; RdU32(VA(A_ARENA_VTBL), &slot0);
-        if (slot0 != (uint32_t)VA(0x4555D0)) { _snprintf_s(why, cap, _TRUNCATE, "arena vtable slot 0 is %08X", slot0); return false; }
-        g_buildSites = Sites1080(); g_buildName = "1.0.8.0";
+    bool hdr1080 = soi == 0x18B2000u && tds == 0x57C6FB75u, hdrCe = soi == 0x1BE6400u && tds == 0x63D3E735u;
+    static const uint8_t resc[7] = { 'R', 'E', 'S', 'C', '1', '0', 0 };
+    // The arena vtable's first slot holds 0x4555D0 in the file; rebase it the same way the loader did.
+    uint32_t slot0 = 0; RdU32(VA(A_ARENA_VTBL), &slot0);
+    bool resc10 = BytesEq(VA(A_RESC10_STR), resc, 7), vtbl = slot0 == (uint32_t)VA(0x4555D0);
+    static const uint8_t anchorA[20] = { 0x0F, 0x58, 0xC8, 0xF3, 0x0F, 0x11, 0x0A, 0xF3, 0x0F, 0x10, 0x49, 0x04, 0xF3, 0x0F, 0x59, 0x48, 0x14, 0xF3, 0x0F, 0x10 };
+    static const uint8_t anchorB[20] = { 0x6A, 0x10, 0x51, 0x8D, 0x44, 0x24, 0x30, 0xC7, 0x04, 0x24, 0x00, 0x00, 0x80, 0x3F, 0x50, 0x8B, 0xCE, 0xE8, 0xD5, 0x76 };
+    bool a = BytesEq(VA(CE_A_ANCHOR_A), anchorA, 20), b = BytesEq(VA(CE_A_ANCHOR_B), anchorB, 20);
+    bool is1080 = resc10 && vtbl, isCe = !is1080 && a && b;
+    g_buildHdr[0] = 0;
+    if (is1080 || isCe) {
+        if (!(is1080 ? hdr1080 : hdrCe))
+            _snprintf_s(g_buildHdr, sizeof(g_buildHdr), _TRUNCATE, " (exe header not stock: SizeOfImage %08X, TimeDateStamp %08X)", soi, tds);
+        g_buildSites = is1080 ? Sites1080() : SitesCe();
+        g_buildName = is1080 ? "1.0.8.0" : "Complete Edition 1.2.0.59";
         return true;
     }
-    if (soi == 0x1BE6400u && tds == 0x63D3E735u) {
-        static const uint8_t anchorA[20] = { 0x0F, 0x58, 0xC8, 0xF3, 0x0F, 0x11, 0x0A, 0xF3, 0x0F, 0x10, 0x49, 0x04, 0xF3, 0x0F, 0x59, 0x48, 0x14, 0xF3, 0x0F, 0x10 };
-        static const uint8_t anchorB[20] = { 0x6A, 0x10, 0x51, 0x8D, 0x44, 0x24, 0x30, 0xC7, 0x04, 0x24, 0x00, 0x00, 0x80, 0x3F, 0x50, 0x8B, 0xCE, 0xE8, 0xD5, 0x76 };
-        bool a = BytesEq(VA(CE_A_ANCHOR_A), anchorA, 20), b = BytesEq(VA(CE_A_ANCHOR_B), anchorB, 20);
-        if (!a || !b) {                  // both wrong: the megabyte is still ciphertext. One wrong: something rewrote it.
-            _snprintf_s(why, cap, _TRUNCATE, !a && !b ? "the Complete Edition's code is still encrypted where SISCO reads it"
-                        : "the Complete Edition's code at %08X is not what SISCO read", (unsigned)(a ? CE_A_ANCHOR_B : CE_A_ANCHOR_A));
-            return false;
-        }
-        g_buildSites = SitesCe(); g_buildName = "the Complete Edition 1.2.0.59";
-        return true;
-    }
-    _snprintf_s(why, cap, _TRUNCATE, "SizeOfImage %08X, TimeDateStamp %08X: neither 1.0.8.0 nor the Complete Edition", soi, tds);
+    if (hdr1080) {
+        if (!resc10) _snprintf_s(why, cap, _TRUNCATE, "RESC10 string not at 0xEBDD00");
+        else _snprintf_s(why, cap, _TRUNCATE, "arena vtable slot 0 is %08X", slot0);
+    } else if (hdrCe || a || b) {       // both wrong: the megabyte is still ciphertext. One wrong: something rewrote it.
+        _snprintf_s(why, cap, _TRUNCATE, !a && !b ? "the Complete Edition's code is still encrypted where SISCO reads it"
+                    : "the Complete Edition's code at %08X is not what SISCO read", (unsigned)(a ? CE_A_ANCHOR_B : CE_A_ANCHOR_A));
+    } else
+        _snprintf_s(why, cap, _TRUNCATE, "SizeOfImage %08X, TimeDateStamp %08X: neither 1.0.8.0 nor 1.2.0.59", soi, tds);
     return false;
 }
 static CoreSites GameCoreSites() { return g_buildSites; }
