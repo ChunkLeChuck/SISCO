@@ -14,7 +14,7 @@ download. The game's own Direct3D 9 renderer is not supported.
 
 ## Installing
 
-Put `SISCO.asi` and `SISCO.ini` in your `plugins` folder, and `vulkan.dll` in the game folder next to `GTAIV.exe`,
+Put `SISCO.asi` in your `plugins` folder, and `vulkan.dll` in the game folder next to `GTAIV.exe`,
 replacing the one FusionFix put there. If you run FusionFix you already have an ASI loader.
 
 `vulkan.dll` is DXVK 3.1.1, unmodified, under the file name FusionFix's D3D9 proxy loads DXVK by. It is the
@@ -23,8 +23,8 @@ FusionFix's `d3d9.cfg` in the game folder must say `API = 1` under `[MAIN]`, whi
 running DXVK before. If you run DXVK as your own `d3d9.dll` instead of through FusionFix, rename the `vulkan.dll`
 from the download to `d3d9.dll` and use it in place of yours; it is the same file.
 
-To uninstall, delete `SISCO.asi`, `SISCO.ini` and `pc\audio\config\waveslots_sisco.xml`; `vulkan.dll` is only a
-newer DXVK and can stay. SISCO never edits a game file: apart from that one file of its own, which the game reads
+To uninstall, delete `SISCO.asi` and `pc\audio\config\waveslots_sisco.xml`, and `plugins\SISCO.ini` if you have
+one; `vulkan.dll` is only a newer DXVK and can stay. SISCO never edits a game file: apart from that one file of its own, which the game reads
 only while SISCO is in, every change it makes lives in memory for that one run.
 
 It writes `plugins\SISCO.log`: a short, plain record of what it changed and what it decided. That file is the first
@@ -33,18 +33,25 @@ it as `SISCO.prev.log`, so after a crash the crashed session's log is still ther
 
 ## If something goes wrong
 
-`SISCO.ini` has four switches and nothing else. They are all on, which is how the mod is meant to run, and you
-should only turn one off to find out which part of the mod is causing a problem.
+SISCO has no settings: everything is on, which is how the mod is meant to run. To rule it out, take `SISCO.asi` out
+of the `plugins` folder and see whether the problem stays (the `vulkan.dll` from the download stays in place; put
+your old one back to rule that out too).
+
+Send `SISCO.log` with any report. To find out which part of the mod causes a problem, you may be asked to turn one
+part off. That takes a text file named `SISCO.ini` in the `plugins` folder with `[SISCO]` on its first line and one
+of these lines under it:
 
 | | what it turns off |
 |---|---|
-| `Enabled=0` | everything. If the problem is still there, it is not SISCO (the `vulkan.dll` from the download stays in place; put your old one back to rule that out too) |
+| `Enabled=0` | everything, the same as taking `SISCO.asi` out |
 | `Fixes=0` | the three bug fixes |
 | `Limits=0` | the bigger pools, the streaming arena and the engine-sound slots |
 | `Budget=0` | the streaming budget, the traffic budgets, the brake, and the presents skipped while loading |
 
 Only the number `0` turns something off. A typo, or a word like `off`, leaves that part on, so you cannot break it
-by mistyping. The log records which switches were on every run, so send it with any report.
+by mistyping. The log records which switches were on every run. Delete the file again afterwards; without it
+everything is on. A `SISCO.ini` from an older version still works the same way, and can be deleted unless you
+turned something off in it on purpose.
 
 Turning `Limits` or `Fixes` off also stops the budget being raised, because a raised budget is only safe behind
 them. Every switch moves the game back towards how it runs without the mod.

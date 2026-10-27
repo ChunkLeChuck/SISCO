@@ -9,6 +9,9 @@
   for the rest of the session. Now, when two steps in a row free nothing, the brake holds the budget where it is, and
   steps again only if free memory keeps falling. On those two logs the budget would have stopped at 2663 and 2077 MB
   instead of 800.
+- The download has no `SISCO.ini` any more. Everything is on without it, as it always was with a missing file, and
+  the way to rule SISCO out is to take `SISCO.asi` out. The file is still read if it is there, so a report can still
+  turn one part off (README, "If something goes wrong"), and a `SISCO.ini` from an older version works as before.
 
 ## 1.0.5 (2026-10-25)
 

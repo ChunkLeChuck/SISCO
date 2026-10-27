@@ -1,12 +1,11 @@
 <#
 .SYNOPSIS
-    Packages SISCO for Nexus: the plugin, its settings file, DXVK 3.1.1 as vulkan.dll, and the licences.
+    Packages SISCO for Nexus: the plugin, DXVK 3.1.1 as vulkan.dll, and the licences.
 
 .DESCRIPTION
     What goes in the zip, and why:
 
       plugins\SISCO.asi         the built plugin, taken from obj\ after build.ps1 has passed everything
-      plugins\SISCO.ini         the four switches, all on
       vulkan.dll                DXVK 3.1.1's official x32\d3d9.dll, unmodified, under the name FusionFix's
                                 D3D9 proxy loads DXVK by. Shipped since 2026-09-23 so that every player runs
                                 the DXVK SISCO is tested against; a clean install's slow load was measured as
@@ -35,7 +34,6 @@ if (-not $verLine) { throw 'SIS_VERSION not found in the sources' }
 $version = $verLine.Matches[0].Groups[1].Value
 
 $asi       = Join-Path $root 'obj\SISCO.asi'
-$ini       = Join-Path $root 'SISCO.ini'
 $readme    = Join-Path $root 'README.md'
 $license   = Join-Path $root 'LICENSE'
 $dxvkDll   = Join-Path $root 'external\dxvk\x32\d3d9.dll'
@@ -43,7 +41,7 @@ $dxvkTerms = Join-Path $root 'external\dxvk\LICENSE-DXVK.txt'
 $dxvkBytes = 7856142
 $dxvkMd5   = '093943DBADC00725ED39BB25B22C9DFA'      # DXVK 3.1.1 x32\d3d9.dll; 3.1's is the same size, only the hash differs
 
-foreach ($f in @($asi, $ini, $readme, $license, $dxvkDll, $dxvkTerms)) {
+foreach ($f in @($asi, $readme, $license, $dxvkDll, $dxvkTerms)) {
     if (-not (Test-Path $f)) { throw "missing: $f" }
 }
 $dxvkItem = Get-Item $dxvkDll
@@ -84,7 +82,6 @@ New-Item -ItemType Directory -Path (Join-Path $stage 'plugins') -Force | Out-Nul
 New-Item -ItemType Directory -Path (Join-Path $stage 'licenses') -Force | Out-Null
 
 Copy-Item $asi       (Join-Path $stage 'plugins\SISCO.asi')
-Copy-Item $ini       (Join-Path $stage 'plugins\SISCO.ini')
 Copy-Item $dxvkDll   (Join-Path $stage 'vulkan.dll')
 Copy-Item $license   (Join-Path $stage 'LICENSE.txt')
 Copy-Item $dxvkTerms (Join-Path $stage 'licenses\LICENSE-DXVK.txt')
