@@ -1281,6 +1281,89 @@ static void CoreTests() {
             BrakeState ls = { 900, true, 600, 0 }; ls.lastL = 600; ls.lastLMs = 9000; ls.downMs = 9000;
             t = BrakeDecide(ls, 10000, 3000, 749, 450, fc, &fa);
             CHECK(t == 800 && fa == BRAKE_FAST, "fast: two steps stop at the floor (%d)", t);
+            // A fast cut, then the climb back. The ceiling only learns from a down action that follows a raise, so the
+            // case runs one first: 2870 proven, a step to 2742, the raise back to 2870, pressed. A fast fall more than
+            // five minutes after that raise and its press is a burst: the ceiling stays 2870 and the budget climbs
+            // back one step per quiet five minutes, each pressed before the next. The same fall inside those five
+            // minutes is the world growing into the raise: the ceiling comes down to the cut and the climb stops there.
+            {
+                BrakeCfg uc = { 512, 32, 128, 192, 20, 800, 1, 0, 0 }; int ua = -1;
+                auto lead = [&](BrakeState& s) {
+                    s = BrakeState{}; s.t = 4000; s.refL = -1;
+                    BrakeDecide(s, 1000, 3300, 799, 500, uc, &ua);             // the hold: 2870
+                    BrakeDecide(s, 301000, 3300, 799, 500, uc, &ua);           // 2870 proven: the ceiling
+                    BrakeDecide(s, 330000, 3300, 799, 466, uc, &ua);           // a 34 MB fall: a step to 2742
+                    BrakeDecide(s, 631000, 3300, 799, 466, uc, &ua);           // five quiet minutes: back to 2870
+                    BrakeDecide(s, 632000, 3300, 799, 466, uc, &ua);           // pressed
+                };
+                BrakeState us; lead(us);
+                CHECK(us.t == 2870 && us.ceiling == 2870 && us.raised && !us.awaitPress, "climb: the lead-in: proven, stepped, raised back and pressed (%d, ceiling %d)", us.t, us.ceiling);
+                BrakeDecide(us, 940000, 3300, 799, 466, uc, &ua);
+                BrakeDecide(us, 941000, 3300, 799, 350, uc, &ua);
+                CHECK(ua == BRAKE_FAST && us.t == 2614 && us.ceiling == 2870, "climb: a fast fall long after the raise is a burst: two steps cut, the ceiling stays 2870 (%d, %d)", us.t, us.ceiling);
+                BrakeDecide(us, 1100000, 3300, 799, 350, uc, &ua);
+                CHECK(ua == BRAKE_NONE && us.t == 2614, "climb: nothing back before five quiet minutes (%d)", us.t);
+                BrakeDecide(us, 1241000, 3300, 799, 350, uc, &ua);
+                CHECK(ua == BRAKE_RAISE && us.t == 2742, "climb: five quiet minutes later, one step back (%d)", us.t);
+                BrakeDecide(us, 1242000, 3300, 799, 350, uc, &ua);
+                BrakeDecide(us, 1400000, 3300, 799, 350, uc, &ua);
+                CHECK(ua == BRAKE_NONE && us.t == 2742, "climb: the next step waits five minutes from when the world pressed the last (%d)", us.t);
+                BrakeDecide(us, 1542000, 3300, 799, 350, uc, &ua);
+                CHECK(ua == BRAKE_RAISE && us.t == 2870, "climb: and comes back to the ceiling (%d)", us.t);
+                BrakeDecide(us, 2000000, 3300, 799, 350, uc, &ua);
+                CHECK(ua == BRAKE_NONE && us.t == 2870, "climb: never past the ceiling (%d)", us.t);
+                BrakeState vs; lead(vs);
+                BrakeDecide(vs, 700000, 3300, 799, 466, uc, &ua);
+                BrakeDecide(vs, 701000, 3300, 799, 350, uc, &ua);
+                CHECK(ua == BRAKE_FAST && vs.t == 2614 && vs.ceiling == 2614, "climb: the same fall a minute after the raise lowers the ceiling to the cut (%d, %d)", vs.t, vs.ceiling);
+                BrakeDecide(vs, 1100000, 3300, 799, 350, uc, &ua);
+                BrakeDecide(vs, 1500000, 3300, 799, 350, uc, &ua);
+                CHECK(vs.t == 2614, "climb: and nothing climbs past it (%d)", vs.t);
+            }
+            // Emergency steps that free nothing stop (two field logs of 1.0.5, FINDINGS 8bb), replayed with their own numbers.
+            {
+                BrakeCfg ec = { 512, 32, 128, 192, 20, 800, 1, 0, 0 }; int ea = -1;
+                // The first: held, stepped, a ceiling at 3175, a step to 3047 at 944 s; a fast fall of 112 MB at 1945 s,
+                // then the largest free block flat at 133 to 138 MB. 1.0.5 stepped every 10 s to the floor of 800.
+                BrakeState es = {}; es.t = 3047; es.held = true; es.refL = 245; es.lastActMs = es.downMs = 944000; es.ceiling = 3175;
+                BrakeDecide(es, 1944000, 3300, 799, 245, ec, &ea);
+                BrakeDecide(es, 1945000, 3175, 799, 133, ec, &ea);
+                CHECK(ea == BRAKE_FAST && es.t == 2791, "stall: his fast fall at 1945 s, two steps (%d)", es.t);
+                BrakeDecide(es, 1955000, 2937, 799, 133, ec, &ea);
+                CHECK(ea == BRAKE_EMERGENCY && es.t == 2663 && !es.stalled, "stall: the fast cut freed nothing: one more emergency step (%d)", es.t);
+                BrakeDecide(es, 1966000, 2830, 799, 133, ec, &ea);
+                CHECK(ea == BRAKE_NONE && es.t == 2663 && es.stalled && (es.ev & BRAKE_EV_STALL), "stall: that one freed nothing either: the steps stop at 2663 (%d)", es.t);
+                const int64_t laterL[] = { 133, 133, 133, 133, 133, 133, 138, 138, 138, 138, 138, 133 };
+                bool quiet = true;
+                for (int i = 0; i < 12; i++) { BrakeDecide(es, 1976000 + 10500 * i, 2500, 799, laterL[i], ec, &ea); if (ea != BRAKE_NONE || (es.ev & BRAKE_EV_STALL)) quiet = false; }
+                CHECK(quiet && es.t == 2663, "stall: the rest of his three minutes: no step, said once, the budget holds 2663 where 1.0.5 reached 800 (%d)", es.t);
+                // The second: stepped to 2333 at 586 s with the block at 408, then 91 MB at 624 s and flat at 91.
+                BrakeState zs = {}; zs.t = 2333; zs.held = true; zs.refL = 408; zs.lastActMs = zs.downMs = 586000; zs.lastL = 408; zs.lastLMs = 586000;
+                BrakeDecide(zs, 624000, 2812, 799, 91, ec, &ea);
+                CHECK(ea == BRAKE_EMERGENCY && zs.t == 2205, "stall: his fall to 91 MB: an emergency step (%d)", zs.t);
+                BrakeDecide(zs, 634000, 2708, 799, 91, ec, &ea);
+                CHECK(ea == BRAKE_EMERGENCY && zs.t == 2077, "stall: it freed nothing: one more (%d)", zs.t);
+                BrakeDecide(zs, 644000, 2590, 799, 91, ec, &ea);
+                CHECK(ea == BRAKE_NONE && zs.t == 2077 && zs.stalled, "stall: nothing again: stopped at 2077 where 1.0.5 reached 800 (%d)", zs.t);
+                for (int i = 0; i < 9; i++) BrakeDecide(zs, 655000 + 10500 * i, 2400, 799, 91, ec, &ea);
+                CHECK(zs.t == 2077, "stall: and it holds (%d)", zs.t);
+                // A further fall of a step's fall (32 MB) resumes them; flat again, they stop again.
+                BrakeDecide(zs, 760000, 2400, 799, 55, ec, &ea);
+                CHECK(ea == BRAKE_EMERGENCY && zs.t == 1949 && !zs.stalled, "stall: a further 36 MB fall resumes the steps (%d)", zs.t);
+                BrakeDecide(zs, 770500, 2300, 799, 55, ec, &ea);
+                BrakeDecide(zs, 781000, 2300, 799, 55, ec, &ea);
+                CHECK(ea == BRAKE_NONE && zs.t == 1821 && zs.stalled, "stall: one more that frees nothing, then they stop again (%d)", zs.t);
+                // The block back over the emergency line, then under it again: the count starts afresh.
+                BrakeDecide(zs, 800000, 2300, 799, 300, ec, &ea);
+                CHECK(!zs.stalled && zs.emFlat == 0, "stall: back over the emergency line, the stop is lifted");
+                BrakeDecide(zs, 900000, 2300, 799, 150, ec, &ea);
+                CHECK(ea == BRAKE_EMERGENCY && zs.t == 1693, "stall: under it again, an emergency step (%d)", zs.t);
+                // Through the worker's tick, onto the release's log.
+                TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+                g_tV = 3300ull << 20; SisTick(20000, 500); SisTick(41000, 150); SisTick(52000, 150); SisTick(63000, 150); SisTick(74000, 150);
+                CHECK(g_brakeSt.t == 2614 && g_brakeSt.stalled && TTabAll(2614), "stall: in play: held, two emergency steps, stopped at 2614 (%d)", g_brakeSt.t);
+                g_tV = 0; TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+            }
             // In play, through the worker's tick, onto the release's log (sis_test reads the lines back).
             TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
             g_tV = 3878ull << 20; SisTick(30000, 520); SisTick(31000, 398); int t1 = g_brakeSt.t; SisTick(32000, 290);
@@ -1530,7 +1613,9 @@ static void CoreTests() {
         CHECK(TTabAll(2870) && g_brakeSt.t == 2870, "up: with a menu open the brake decides nothing, not even an emergency");
         tMenuB = 0; g_cs.menu = keepMenuB;
         int64_t ms = 330000;
-        while (g_brakeSt.t >= 2000 && ms < 500000) { SisTick(ms, 100); ms += 11000; }
+        // Each emergency on a fresh fall: since 1.0.5's stop (8bb) steps that free nothing stop after two, so the block
+        // comes back over the line between them (300 MB, 5.5 s later) and falls to 100 again; the steps keep their 11 s.
+        while (g_brakeSt.t >= 2000 && ms < 500000) { SisTick(ms, 100); SisTick(ms + 5500, 300); ms += 11000; }
         int low = g_brakeSt.t;
         CHECK(low == 1974 && TTabAll(1974) && g_tVeh == CarPedFor(CAR_STOCK, CAR_FULL, 1974, TStockFloor(2)) && g_tPed == CarPedFor(PED_STOCK, PED_FULL, 1974, TStockFloor(2)),
               "up: emergencies down to %d, car and ped follow (%u, %u)", low, g_tVeh, g_tPed);
@@ -1842,8 +1927,8 @@ static void CoreTests() {
         SisTick(60000, 420); SisTick(81000, 380);
         CHECK(TTabAll(2486) && g_tPed == 250000000u && g_tVeh == 200000000u,
               "brake: still nothing off the cars and peds while the budget is over 2000 MB (car %u, ped %u)", g_tVeh, g_tPed);
-        int64_t ms = 102000;                                  // an emergency steps every 10 s, fall or not
-        while (g_brakeSt.t > 1400 && ms < 400000) { SisTick(ms, 100); ms += 11000; }
+        int64_t ms = 102000;                                  // an emergency steps every 10 s on a fresh fall (8bb: the block back over the line between)
+        while (g_brakeSt.t > 1400 && ms < 400000) { SisTick(ms, 100); SisTick(ms + 5500, 300); ms += 11000; }
         uint32_t wantCar = CarPedFor(CAR_STOCK, CAR_FULL, g_brakeSt.t, TStockFloor(2));
         CHECK(g_tVeh == wantCar && wantCar < 200000000u && wantCar > CAR_STOCK && g_tPed == 250000000u && g_car.target == wantCar,
               "brake: under 2000 MB the car budget follows the world (budget %d MB, car %u MB), the larger ped budget stands",
@@ -2013,7 +2098,7 @@ static void CoreTests() {
         TSizeReset(1, 23370, 250000000u, PED_STOCK); TSizeSettle(1000, 3000);
         g_tV = 3300ull << 20;                                 // the brake needs a video-memory figure to hold against
         int64_t bms = 100000;
-        while (g_brakeSt.t > g_sizedTStock && bms < 900000) { SisTick(bms, 100); bms += 11000; }
+        while (g_brakeSt.t > g_sizedTStock && bms < 900000) { SisTick(bms, 100); SisTick(bms + 5500, 300); bms += 11000; }
         CHECK(g_brakeSt.t == g_sizedTStock && g_tVeh == 250000000u && g_car.target == 250000000u,
               "brake: at the floor, a car budget another mod set before the sizing still stands (%u MB, budget %d)",
               g_tVeh / 1000000, g_brakeSt.t);

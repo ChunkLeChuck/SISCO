@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.6 (2026-10-27)
+
+- The brake stops lowering the budget when lowering it frees nothing. After a sudden drop in free memory, two players'
+  1.0.5 logs showed the largest free block staying put while the brake's emergency step every 10 seconds took the
+  budget all the way down to the game's own: 1.3 to 1.9 GB of textures let go and no memory back, because what a step
+  frees stays inside DXVK's memory. The game kept running, but houses, roads and textures loaded late or not at all
+  for the rest of the session. Now, when two steps in a row free nothing, the brake holds the budget where it is, and
+  steps again only if free memory keeps falling. On those two logs the budget would have stopped at 2663 and 2077 MB
+  instead of 800.
+
 ## 1.0.5 (2026-10-25)
 
 - The log is shorter: one line per thing with its figures, two lines per load instead of four, the engine-sound peak

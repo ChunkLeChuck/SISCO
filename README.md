@@ -130,7 +130,8 @@ looks at how much room is left, and if it is running out it eases the budget bac
 from the world first; the car and ped budgets only follow once the world budget has fallen below 2000 MB. Measured:
 the city thins slightly instead of the game falling over. When the free space drops fast (96 MB or more within one
 second, as when a mission starts on a heavy install), it does not wait for its next step: it lowers the budget two
-steps on that second.
+steps on that second. And when two steps in a row free no memory, it stops lowering: the budget holds where it is, and
+it steps again only if the free space keeps falling, so the world is not cut for nothing.
 
 A budget level that has held for 5 minutes with no address space lost, and that the world is filling when they end,
 becomes the ceiling. When a burst forces the budget under it (a taxi skip, a mission start), the budget climbs back

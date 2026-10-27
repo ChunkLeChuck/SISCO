@@ -125,6 +125,11 @@ int main() {
           && strstr(buf, "  brake     FAST fall, two steps at 32 s: budget 3257 -> 3001 MB (V 3878 MB, largest free 290 MB")
           && strstr(buf, "; it fell 108 MB in one second)"),
           "fast: the hold on a fast fall and the double step are on the log with what fell");
+    {
+        int st = 0; for (const char* q = buf; (q = strstr(q, "  brake     stopped at ")) != NULL; q++) st++;
+        CHECK(strstr(buf, "  brake     stopped at 63 s: two steps freed nothing (largest free 150 MB); budget stays 2614 MB") && st == 1,
+              "stall: the stop is on the log once, with the block and the budget it holds (%d lines)", st);
+    }
     CHECK(!strstr(buf, "  built     "), "sizing: the read-back line is gone; a raise another plugin undid has its own site line");
     CHECK(strstr(buf, "LEFT AT THE GAME'S OWN: the link pool was not raised") && !strstr(buf, ", the game's own (card 23370 MB, render targets 799 MB, the card allows 20050), LEFT"),
           "size: a budget left at the game's own says so once");

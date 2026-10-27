@@ -35,7 +35,7 @@
 #ifndef SISCO_BUILD
 #define SISCO_BUILD "dev"
 #endif
-#define SIS_VERSION "1.0.5"
+#define SIS_VERSION "1.0.6"
 
 // ---------------------------------------------------------------------------------------------
 // Addresses (1.0.8.0 VA, image base 0x400000), rebased at run time. SITE lines are checked against GTAIV.exe on disk
@@ -1671,7 +1671,18 @@ struct BrakeState {
     int64_t downMs;                               // the last down action on the clock: the step and emergency wait, never moved by a pause
     int64_t lastL, lastLMs;                       // L on the last tick decided, and when; 0 = none (a pause clears it)
     int fastMb;                                   // what L fell in that one tick when it was a fast fall (BRAKE_FAST_MB), for the log; else 0
+    int emFlat;                                   // emergency steps in a row after a down action that freed nothing (BRAKE_EM_FLAT_MAX)
+    bool stalled;                                 // the emergency steps stopped: they freed nothing; until L falls further or rises out
 };
+// Emergency steps that free nothing stop (two field logs of 1.0.5, 2026-10-27, FINDINGS 8bb). After a big fall the
+// largest free block sat flat, at 133 MB in one and 91 MB in the other, while the emergency step every 10 s took the
+// budget to the floor in two to three minutes: 1.3 to 1.9 GB of video memory let go and not one MB of address space
+// back (what a step frees stays inside DXVK's mapped chunks, and those are not one block). The game ran on, but at the
+// floor the world loaded late or not at all, and the budget never climbed back (a raise needs L over the emergency line).
+// So an emergency step after a down action that freed nothing is allowed once more (DXVK gives an empty chunk back
+// after 20 s, the two steps' span); if that one frees nothing either the steps stop and the budget holds. They resume
+// when L falls a step's fall (fallMb) further, or when L comes back over the emergency line.
+#define BRAKE_EM_FLAT_MAX 1
 enum { BRAKE_NONE = 0, BRAKE_HOLD = 1, BRAKE_STEP = 2, BRAKE_EMERGENCY = 3, BRAKE_RAISE = 4, BRAKE_CLAMP = 5, BRAKE_FAST = 6 };
 // A fast fall: L down this much from one tick to the next, a second apart (a player's crash, 2026-10-24, FINDINGS 8az:
 // the brake first held at 398 MB, so more than 114 MB went inside the second before, and the game died before its next
@@ -1681,7 +1692,7 @@ enum { BRAKE_NONE = 0, BRAKE_HOLD = 1, BRAKE_STEP = 2, BRAKE_EMERGENCY = 3, BRAK
 // hold that comes on one goes two steps under what is in use. Each further fast tick acts again.
 #define BRAKE_FAST_MB 96
 #define BRAKE_FAST_GAP_MS 1500    // the two ticks this close: a pause, a stall or a missed tick is not a fast fall
-enum { BRAKE_EV_CEIL_SET = 1, BRAKE_EV_CEIL_LEARNED = 2, BRAKE_EV_CEIL_X = 4, BRAKE_EV_CEIL_CAP = 8 };
+enum { BRAKE_EV_CEIL_SET = 1, BRAKE_EV_CEIL_LEARNED = 2, BRAKE_EV_CEIL_X = 4, BRAKE_EV_CEIL_CAP = 8, BRAKE_EV_STALL = 16 };
 #define BRAKE_UP_SPAN_MS 300000   // a starting value, about twice BRAKEN2's longest quiet stretch that still ended in a loss (165 s)
 #define BRAKE_FLAT_MB 8           // less than one of DXVK's 16 MiB chunks
 #define BRAKE_PRESS_MB 64         // V within this of the wall: the world presses the budget (BRAKEN2 pressed: -2 to +15 MB of credit)
@@ -1734,6 +1745,7 @@ static int BrakeDecide(BrakeState& st, int64_t nowMs, int64_t vMb, int64_t xMb, 
         bool burst = st.fallMs && nowMs - st.fallMs <= BRAKE_BURST_MS && st.fallMs - st.lastUpMs >= BRAKE_UP_SPAN_MS
                      && !st.awaitPress && st.fallMs - st.pressMs >= BRAKE_UP_SPAN_MS;
         st.refL = lMb; st.lastActMs = st.downMs = nowMs; st.proofMs = nowMs; st.proofL = lMb; st.fallMs = 0;
+        st.emFlat = 0; st.stalled = false;
         int t = st.t - 2 * c.stepMb; if (t < c.floorMb) t = c.floorMb;
         if (t < st.t) {
             st.t = t; *action = BRAKE_FAST;
@@ -1742,7 +1754,15 @@ static int BrakeDecide(BrakeState& st, int64_t nowMs, int64_t vMb, int64_t xMb, 
         }
         return st.t;
     }
+    if (!emergency) { st.emFlat = 0; st.stalled = false; }
     if (nowMs - st.downMs >= (int64_t)(emergency ? c.waitS / 2 : c.waitS) * 1000 && (emergency || st.refL - lMb >= c.fallMb)) {
+        if (emergency && st.refL - lMb < c.fallMb) {     // no further fall since the last down action: it freed nothing
+            if (st.emFlat >= BRAKE_EM_FLAT_MAX) {
+                if (!st.stalled) { st.stalled = true; st.ev |= BRAKE_EV_STALL; }
+                return st.t;
+            }
+            st.emFlat++;
+        } else { st.emFlat = 0; st.stalled = false; }
         bool burst = !emergency && st.fallMs && nowMs - st.fallMs <= BRAKE_BURST_MS && st.fallMs - st.lastUpMs >= BRAKE_UP_SPAN_MS
                      && !st.awaitPress && st.fallMs - st.pressMs >= BRAKE_UP_SPAN_MS;
         st.refL = lMb; st.lastActMs = st.downMs = nowMs; st.proofMs = nowMs; st.proofL = lMb; st.fallMs = 0;
@@ -1982,6 +2002,8 @@ static void BrakeTick(uintptr_t table, int64_t nowMs, int64_t vMb, int64_t xMb, 
                g_brakeSt.ceiling);
     if (g_brakeSt.ev & BRAKE_EV_CEIL_CAP)
         SisLog("brake", "ceiling lowered to %d MB: capped (larger render targets or the game's clamp)", g_brakeSt.ceiling);
+    if (g_brakeSt.ev & BRAKE_EV_STALL)
+        SisLog("brake", "stopped at %lld s: two steps freed nothing (largest free %lld MB); budget stays %d MB", nowMs / 1000, lMb, g_brakeSt.t);
     if (act == BRAKE_RAISE) TrafficRaise(t, g_sizedTStock);
     else if (act != BRAKE_NONE) TrafficFollow(t, g_sizedTStock);
 }
