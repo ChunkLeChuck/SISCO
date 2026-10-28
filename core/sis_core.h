@@ -35,7 +35,7 @@
 #ifndef SISCO_BUILD
 #define SISCO_BUILD "dev"
 #endif
-#define SIS_VERSION "1.0.6"
+#define SIS_VERSION "1.0.7"
 
 // ---------------------------------------------------------------------------------------------
 // Addresses (1.0.8.0 VA, image base 0x400000), rebased at run time. SITE lines are checked against GTAIV.exe on disk
@@ -68,6 +68,18 @@
 // SITE bytes  SlotSize      0xA09860  68 10 27 00 00
 // The streaming arena's size in KB (mov edi, 0x28000), read once by 0x401060 when it builds the arena.
 // SITE bytes  ArenaSize     0x40108C  BF 00 80 02 00
+// The game's main heap (heap 0 of the multi allocator, the simple allocator 0x19CF9F0): 100 MiB, built by 0x454740,
+// which 0x401060 calls once at 0x40107A, just before it builds the arena, after it sets bit 1 of [0x19D1B04]. The pools,
+// the link and slot nodes and much of what the game and its mods allocate in play come out of it. The size is written
+// four times in the builder: the allocation, the object's size field, SMPA10's message and the init's argument.
+// SITE bytes  HeapCall      0x40107A  E8 C1 36 05 00
+// SITE bytes  HeapSize1     0x4547C8  68 00 00 40 06
+// SITE bytes  HeapSize2     0x4547D5  C7 05 40 FA 9C 01 00 00 40 06
+// SITE bytes  HeapSize3     0x4547FD  68 00 00 40 06
+// SITE bytes  HeapSize4     0x454813  B9 00 00 40 06
+// SMPA20: a simple allocator's small-block path (only heaps of 1 MiB or more take it, 0x455430) found no page; the
+// heap is in edi, the size asked in ebx, and the game ends at the fatal-error function called here.
+// SITE call   Smpa20        0x4548EB  -> 0x456680
 // The native-table init, which is the startup crash: the size is stored before the allocation, the pointer after it,
 // the keys alone are zeroed. Two callers (0x625515, and the lazy 0x626B57 when the size is still 0).
 // SITE bytes  NativeInit    0x626A80  64 A1 2C 00 00 00
@@ -115,6 +127,14 @@
 #define A_SPIN_ACQUIRE  0x456320u   // cdecl (lock): InterlockedCompareExchange(lock, 1, 0) and a back-off loop; no owner kept
 #define A_SLOT_SIZE     0xA09860u   // push 0x2710: the drawable-slot pool's node count, read once by the streaming init
 #define A_ARENA_SIZE    0x40108Cu   // mov edi, 0x28000: the arena size in KB, read once by 0x401060
+#define A_HEAP_CALL     0x40107Au   // call 0x454740: the main heap's builder, unless another mod replaced it
+#define A_HEAP_BUILD    0x454740u
+#define A_HEAP_SIZE1    0x4547C8u   // push 0x6400000: the allocation
+#define A_HEAP_SIZE2    0x4547D5u   // mov [0x19CFA40], 0x6400000: the object's size field (+0x50)
+#define A_HEAP_SIZE3    0x4547FDu   // push 0x6400000: SMPA10's message
+#define A_HEAP_SIZE4    0x454813u   // mov ecx, 0x6400000: the init's size
+#define A_SMPA20        0x4548EBu   // call 0x456680 with SMPA20
+#define A_FATAL         0x456680u   // the game's fatal-error function: a message box, then the game ends
 #define A_ARENA_VTBL    0xEC0824u
 #define A_RESC10_STR    0xEBDD00u
 #define A_NATIVE_INIT   0x626A80u   // the native-table init: esi = capacity, ret
@@ -152,7 +172,8 @@
 #define D_LINK_LOCK     0x1676180u  // its spinlock
 #define D_SLOT_POOL     0x121B9E0u  // the drawable-slot pool: free list [+0x20] (first) to the sentinel +0x24
 #define D_ARENA         0x19CF920u  // the arena object (vtable 0 until it is built)
-#define D_INIT_GUARD    0x19D1B04u  // bit 2 is set by 0x401060 once the arena is allocated
+#define D_INIT_GUARD    0x19D1B04u  // bit 2 is set by 0x401060 once the arena is allocated; bit 1 before it builds the main heap
+#define D_HEAP0         0x19CF9F0u  // the main heap: vtable 0 until it is built; +0x50 its size, +0x98 what is free
 #define D_NATIVE_PTR    0x190FDD0u  // the native table: pointer, size, capacity for the lazy init, count
 #define D_NATIVE_SIZE   0x190FDD4u
 #define D_NATIVE_COUNT  0x190FDDCu
@@ -240,6 +261,12 @@
 // CESITE bytes  LinkSize      0xAF48F0  68 C8 32 00 00
 // CESITE bytes  SlotSize      0xA8ABD0  68 10 27 00 00
 // CESITE bytes  ArenaSize     0x4010D6  BF 00 80 02 00
+// CESITE bytes  HeapCall      0x401072  E8 19 18 00 00
+// CESITE bytes  HeapSize1     0x40290D  68 00 00 40 06
+// CESITE bytes  HeapSize2     0x402914  C7 05 58 69 BB 01 00 00 40 06
+// CESITE bytes  HeapSize3     0x40293C  68 00 00 40 06
+// CESITE bytes  HeapSize4     0x402950  68 00 00 40 06
+// CESITE call   Smpa20        0x402A38  -> 0x4036A0
 // CESITE bytes  NativeInit    0x86FC70  64 A1 2C 00 00 00
 // CESITE bytes  VStructName   0xA7B107  68 60 FD E9 00
 // CESITE bytes  VStructSize   0xA7B10C  6A 32 8B C8
@@ -274,6 +301,14 @@
 #define CE_A_SPIN_ACQUIRE  0x403C10u
 #define CE_A_SLOT_SIZE     0xA8ABD0u
 #define CE_A_ARENA_SIZE    0x4010D6u   // and 0x4010E9, the game's own smaller arena under about 1.4 GiB of RAM: left alone
+#define CE_A_HEAP_CALL     0x401072u
+#define CE_A_HEAP_BUILD    0x402890u
+#define CE_A_HEAP_SIZE1    0x40290Du
+#define CE_A_HEAP_SIZE2    0x402914u   // mov [0x1BB6958], 0x6400000
+#define CE_A_HEAP_SIZE3    0x40293Cu
+#define CE_A_HEAP_SIZE4    0x402950u   // push 0x6400000: the init's size is pushed here, not loaded into ecx
+#define CE_A_SMPA20        0x402A38u   // the heap in esi, the size asked in edi
+#define CE_A_FATAL         0x4036A0u
 #define CE_A_NATIVE_INIT   0x86FC70u   // the native-table init: [esp+4] = capacity, returns the table pointer, ret 4
 #define CE_A_NATIVE_SIZE_ST 0x86FC94u  // mov [size], ebx (1.0.8.0: esi), still before the allocation: crash 1 is here too
 #define CE_A_NATIVE_PTR_ST 0x86FCA8u
@@ -305,6 +340,7 @@
 #define CE_D_SLOT_POOL     0x1173758u
 #define CE_D_ARENA         0x1BB8A08u
 #define CE_D_INIT_GUARD    0x1BB6900u  // bit 1 the first step, 2 the block records, 4 the arena memory: 6 means too late
+#define CE_D_HEAP0         0x1BB6908u
 #define CE_D_NATIVE_PTR    0x1B4AF1Cu
 #define CE_D_NATIVE_SIZE   0x1B4AF20u
 #define CE_D_NATIVE_COUNT  0x1B4AF28u
@@ -461,12 +497,12 @@ static const char* StName(int s) {
 }
 enum { S_PUSH, S_PUSH_IN1, S_PUSH_IN2, S_PUSH_IN3, S_PUSH_IN4, S_DRAIN1, S_DRAIN2, S_DRAIN3, S_DRAIN4, S_DRAIN5,
        S_LINK_TAKE1, S_LINK_TAKE2, S_LINK_FREE1, S_LINK_FREE2, S_LINK_FREE3, S_NATIVE_INIT, S_VSTRUCT, S_ARENA_SIZE,
-       S_SLOT_SIZE, S_LINK_SIZE, S_D3D_IAT, S_ENGINE, S_COUNT };
+       S_SLOT_SIZE, S_LINK_SIZE, S_D3D_IAT, S_ENGINE, S_GAME_HEAP, S_SMPA20, S_COUNT };
 // The fourth inline push and the fifth drain site exist only on the Complete Edition; on 1.0.8.0 they are marked
 // ST_ABSENT, so the log does not mention them.
 static const char* const kSiteName[S_COUNT] = { "QueuePush", "QueuePushIn1", "QueuePushIn2", "QueuePushIn3", "QueuePushIn4",
     "DrainFlush", "DrainCreate", "DrainOver1", "DrainOver2", "DrainFlush2", "LinkTake1", "LinkTake2", "LinkFree1", "LinkFree2",
-    "LinkFree3", "NativeInit", "VehicleStruct", "ArenaSize", "SlotSize", "LinkSize", "D3DCreate9", "EngineSlots" };
+    "LinkFree3", "NativeInit", "VehicleStruct", "ArenaSize", "SlotSize", "LinkSize", "D3DCreate9", "EngineSlots", "GameHeap", "Smpa20" };
 struct Site { int state; char note[112]; };
 static Site g_site[S_COUNT];
 static uint32_t g_raised[S_COUNT];   // what each size raise left at its site, read back at sizing
@@ -847,6 +883,9 @@ struct CoreSites {                                                    // rebased
     uint8_t waveReadPush;                                             // the reader is push [ptr] (the CE) rather than mov edx, [ptr]
     const AudioRef* audioRefs; int audioRefN; intptr_t audioRefShift; // the table's references; shift = where the exe loaded
     uint8_t audioCapModRm;                                            // the loop counts in eax (0xF8) or, on the CE, edi (0xFF)
+    uintptr_t heapCall, heapBuild, heapSize[4], heapObj;              // the main heap
+    uint8_t heapOp4;                                                  // its fourth size: mov ecx (0xB9) on 1.0.8.0, a push (0x68) on the CE
+    uintptr_t smpaCall, fatal;                                        // the SMPA20 call and the fatal-error function it calls
 };
 static CoreSites g_cs;
 
@@ -858,7 +897,7 @@ static void SitesShape1080(CoreSites& c) {
     for (int i = 0; i < 4; i++) c.pushInEdi[i] = 0;
     c.linkFreeForm[0] = F_MOV_EBX; c.linkFreeForm[1] = F_MOV_EBX; c.linkFreeForm[2] = F_MOV_IMM0;
     c.initGuardMask = 4; c.nativeSizeForm = F_MOV_ESI; c.paramCmpForm = F_CMP_ESI; c.playerPedOff = 0x58Cu;
-    c.audioCapModRm = 0xF8; c.waveReadPush = 0;
+    c.audioCapModRm = 0xF8; c.waveReadPush = 0; c.heapOp4 = 0xB9;
 }
 static void SitesShapeCe(CoreSites& c) {
     c.build = BUILD_CE;
@@ -866,7 +905,7 @@ static void SitesShapeCe(CoreSites& c) {
     c.pushInEdi[0] = 1; c.pushInEdi[1] = 0; c.pushInEdi[2] = 0; c.pushInEdi[3] = 1;   // the first and the fourth store edi
     c.linkFreeForm[0] = F_MOV_IMM0; c.linkFreeForm[1] = F_MOV_EAX; c.linkFreeForm[2] = F_MOV_IMM0;
     c.initGuardMask = 6; c.nativeSizeForm = F_MOV_EBX; c.paramCmpForm = F_CMP_ECX; c.playerPedOff = 0x598u;
-    c.audioCapModRm = 0xFF; c.waveReadPush = 1;
+    c.audioCapModRm = 0xFF; c.waveReadPush = 1; c.heapOp4 = 0x68;
 }
 
 // A pool or arena size written as an imm32 (op xx xx xx xx) that the game reads once when it builds that pool. Raised to
@@ -892,6 +931,85 @@ static bool RaiseArena(const CoreSites& c, uint32_t mib) {
     RdU32(c.arenaObj, &vt); RdU32(c.initGuard, &guard);
     return RaiseImm32(S_ARENA_SIZE, c.arenaSize, 0xBF, mib * 1024u, 32u * 1024u, 1000u * 1024u,
                       vt != 0 || (guard & c.initGuardMask) != 0);
+}
+// The game's main heap, 100 MiB raised to `mib` before the game builds it. Measured (H1, FINDINGS 8bc): with the stress
+// pack it had 5.8 MB free at its lowest and 6 to 8 MB through 30 minutes of play, and a player's game ended with SMPA20,
+// the error of a heap with no room left. The size is written at four sites of the builder: all four are read and must
+// agree before any is written, and none is written unless the call still reaches the game's own builder (ZolikaPatch's
+// NewMemorySystem replaces the heap there). A larger size another mod wrote stands.
+static bool RaiseGameHeap(const CoreSites& c, uint32_t mib) {
+    uint32_t want = mib << 20, vt = 1, guard = 1;
+    RdU32(c.heapObj, &vt); RdU32(c.initGuard, &guard);
+    if (vt != 0 || (guard & 1)) { SiteSet(S_GAME_HEAP, ST_OFF_ERROR, "too late: the game already built it"); return false; }
+    uint8_t call = 0; int32_t rel = 0;
+    __try { call = *(uint8_t*)c.heapCall; rel = *(int32_t*)(c.heapCall + 1); } __except (EXCEPTION_EXECUTE_HANDLER) { SiteSet(S_GAME_HEAP, ST_OFF_ERROR, "unreadable"); return false; }
+    if (call != 0xE8 || c.heapCall + 5 + rel != c.heapBuild) {
+        SiteSet(S_GAME_HEAP, ST_OFF_MISMATCH, "not the game's own: another mod builds it (ZolikaPatch's NewMemorySystem)"); return false;
+    }
+    // What precedes each size: push, mov [the object's size field], push, and mov ecx or push.
+    uint8_t pre[4][6] = { { 0x68 }, { 0xC7, 0x05 }, { 0x68 }, { c.heapOp4 } };
+    const size_t preN[4] = { 1, 6, 1, 1 };
+    uint32_t field = (uint32_t)(c.heapObj + 0x50); memcpy(pre[1] + 2, &field, 4);
+    uint32_t v[4] = { 0 };
+    for (int i = 0; i < 4; i++)
+        if (!BytesEq(c.heapSize[i], pre[i], preN[i]) || !RdU32(c.heapSize[i] + preN[i], &v[i])) {
+            SiteSet(S_GAME_HEAP, ST_OFF_MISMATCH, "size %d of 4 is not the instruction read (%08X)", i + 1, (unsigned)c.heapSize[i]); return false;
+        }
+    if (v[1] != v[0] || v[2] != v[0] || v[3] != v[0] || v[0] < (64u << 20) || v[0] > (512u << 20)) {
+        SiteSet(S_GAME_HEAP, ST_OFF_MISMATCH, "its four sizes disagree (%u, %u, %u, %u)", v[0], v[1], v[2], v[3]); return false;
+    }
+    if (v[0] >= want) { g_raised[S_GAME_HEAP] = v[0]; SiteSet(S_GAME_HEAP, ST_ON, "kept %u MiB (already at least %u)", v[0] >> 20, mib); return true; }
+    for (int i = 0; i < 4; i++)
+        if (!WriteCode(c.heapSize[i] + preN[i], &want, 4)) {
+            for (int j = 0; j < i; j++) WriteCode(c.heapSize[j] + preN[j], &v[0], 4);   // all four or none
+            SiteSet(S_GAME_HEAP, ST_OFF_ERROR, "VirtualProtect failed"); return false;
+        }
+    g_raised[S_GAME_HEAP] = want; SiteSet(S_GAME_HEAP, ST_ON, "%u -> %u MiB", v[0] >> 20, mib); return true;
+}
+// SMPA20 ends the game with its own error box, which names no heap. The one call to the fatal-error function on that
+// path goes through SISCO first, so the log says which heap ran out and what the main heap had left. Nothing else
+// changes: the game's own error follows. The text is built apart from the log so the harness can read it.
+static uintptr_t g_fatal, g_heap0, g_audioObjAt;
+static void SmpaText(char* out, size_t cap, uint32_t heap, uint32_t asked) {
+    uint32_t size = 0, avail = 0, audio = 0, mainSize = 0, mainAvail = 0;
+    RdU32(heap + 0x50, &size); RdU32(heap + 0x98, &avail); RdU32(g_audioObjAt, &audio);
+    RdU32(g_heap0 + 0x50, &mainSize); RdU32(g_heap0 + 0x98, &mainAvail);
+    const char* what = heap == (uint32_t)g_heap0 ? "the game's main heap" : audio && heap == audio ? "the audio heap" : "one of the game's smaller heaps";
+    if (heap == (uint32_t)g_heap0)
+        _snprintf_s(out, cap, _TRUNCATE, "SMPA20: %s (%u MB) ran out: %u KB free, %u bytes asked", what, size >> 20, avail >> 10, asked);
+    else
+        _snprintf_s(out, cap, _TRUNCATE, "SMPA20: %s (%u MB) ran out: %u KB free, %u bytes asked; the main heap had %u KB free of %u MB",
+                    what, size >> 20, avail >> 10, asked, mainAvail >> 10, mainSize >> 20);
+}
+static void __stdcall SmpaNote(uint32_t heap, uint32_t asked) {
+    char t[200]; SmpaText(t, sizeof(t), heap, asked);
+    SisLog("crash", "%s", t);
+}
+// At the call the game has pushed what is free, the size asked and the code, so the size asked is [esp+8] on entry,
+// [esp+40] once pushad has run. The heap is in edi on 1.0.8.0 and in esi on the CE.
+__declspec(naked) static void ThunkSmpa1080() {
+    __asm {
+        pushad
+        push dword ptr [esp + 40]
+        push edi
+        call SmpaNote
+        popad
+        jmp dword ptr [g_fatal]
+    }
+}
+__declspec(naked) static void ThunkSmpaCe() {
+    __asm {
+        pushad
+        push dword ptr [esp + 40]
+        push esi
+        call SmpaNote
+        popad
+        jmp dword ptr [g_fatal]
+    }
+}
+static bool InstallSmpaNote(const CoreSites& c) {
+    g_fatal = c.fatal; g_heap0 = c.heapObj; g_audioObjAt = c.audioHeapPtr - 4;   // the audio heap's object sits just before its buffer pointer
+    return PatchCall(S_SMPA20, c.smpaCall, c.fatal, c.build == BUILD_CE ? (void*)ThunkSmpaCe : (void*)ThunkSmpa1080);
 }
 // VehicleStruct: push imm8 (signed, at most 0x7F), right after the push of the pool's name.
 static bool RaiseVehicleStruct(const CoreSites& c, uint8_t want) {
@@ -938,8 +1056,14 @@ static void ReadBackRaises(const CoreSites& c) {
                         ? "another plugin set the size after SISCO" : "the constructor call is hooked (IVTweaker's MaxVehicleStruct)");
         if (g_site[S_VSTRUCT].state != ST_ON) SisLog("site", "%s %s (%s)", kSiteName[S_VSTRUCT], StName(g_site[S_VSTRUCT].state), g_site[S_VSTRUCT].note);
     }
-    _snprintf_s(g_builtNote, sizeof(g_builtNote), _TRUNCATE, "drawable slots %u, links %u, arena %u KB, VehicleStruct pool %u (read back at sizing; 0 where a raise was not on)",
-                v3[0], v3[1], v3[2], built);
+    uint32_t heap = 0;
+    if (g_site[S_GAME_HEAP].state == ST_ON) {
+        if (!RdU32(c.heapObj + 0x50, &heap)) SiteSet(S_GAME_HEAP, ST_OFF_ERROR, "unreadable at sizing");
+        else if (heap < g_raised[S_GAME_HEAP]) SiteSet(S_GAME_HEAP, ST_OFF_MISMATCH, "built with %u MiB, not the %u SISCO left", heap >> 20, g_raised[S_GAME_HEAP] >> 20);
+        if (g_site[S_GAME_HEAP].state != ST_ON) SisLog("site", "%s %s (%s)", kSiteName[S_GAME_HEAP], StName(g_site[S_GAME_HEAP].state), g_site[S_GAME_HEAP].note);
+    }
+    _snprintf_s(g_builtNote, sizeof(g_builtNote), _TRUNCATE, "drawable slots %u, links %u, arena %u KB, VehicleStruct pool %u, main heap %u MB (read back at sizing; 0 where a raise was not on)",
+                v3[0], v3[1], v3[2], built, heap >> 20);
 }
 // The race fix goes in only when the whole function is the one read: its entry and its three stores.
 static bool InstallRaceFix(const CoreSites& c) {
@@ -2733,8 +2857,12 @@ static void SisSize(int64_t xMb) {
     // A fragmented layout on Wine without Proton's WoW64 mode: the one thing a player can do about it, behind the layout.
     const char* wow64 = IsWine() && (int64_t)(wineAs.largest >> 20) < WINE_ROOMY_MB && !ProtonWow64() && g_asView != -2
                         ? " (on Proton, PROTON_USE_WOW64=1 leaves the game far more)" : "";
+    // The main heap as the game built it and what is free in it now: SMPA20 is that heap running out (FINDINGS 8bc).
+    char heapNote[64] = ""; uint32_t hs = 0, hf = 0;
+    if (RdU32(g_cs.heapObj + 0x50, &hs) && hs && RdU32(g_cs.heapObj + 0x98, &hf))
+        _snprintf_s(heapNote, sizeof(heapNote), _TRUNCATE, "; main heap %u MB, %u MB free", hs >> 20, hf >> 20);
     _snprintf_s(g_sizeNote, sizeof(g_sizeNote), _TRUNCATE,
-                "%s (card %lld MB%s, render targets %lld MB, the card allows %d)%s%s%s%s%s%s; %s, %s%s%s%s%s%s%s%s",
+                "%s (card %lld MB%s, render targets %lld MB, the card allows %d)%s%s%s%s%s%s; %s, %s%s%s%s%s%s%s%s%s",
                 budNote, bMb, vmNote, xMb, tVram,
                 g_extraStreaming ? "; ExtraStreamingMemory on" : "",
                 wineCap ? "; capped at 2000 on Wine (fragmented address space)" : "",
@@ -2745,7 +2873,7 @@ static void SisSize(int64_t xMb) {
                 lowRam ? " (the game's low-memory values kept)"
                        : g_carHeld ? " (car held at 120 MB: VehicleStruct pool not raised)" : "",
                 car > CarPedFor(CAR_STOCK, CAR_FULL, t, tStock) || ped > CarPedFor(PED_STOCK, PED_FULL, t, tStock) ? " (another mod's larger value kept)" : "",
-                oneWay, figOffNote, as, wow64, saw);
+                oneWay, figOffNote, as, wow64, heapNote, saw);
     SisLog("size", "%s", g_sizeNote);
 }
 // The game's own budget for the texture quality in force, read at sizing before SISCO wrote the table.
@@ -3232,8 +3360,9 @@ static SisLoadResult SisInstall(const CoreSites& c) {
     // d3d9.dll was guessed wrong and left with a raised budget loading through a stock arena, which empties the
     // world. Raising it always is measured to cost nothing that matters: without DXVK the budget stays the game's
     // own, the extra room is never the binding limit, and a texture pack can exhaust the stock arena by itself.
-    if (g_set.limits) r.arena = RaiseArena(c, 400);
+    if (g_set.limits) { RaiseGameHeap(c, 128); r.arena = RaiseArena(c, 400); }
     if (g_set.limits) r.engine = InstallEngineSlots(c, g_enginePlan);   // PlanEngineSlots ran first, in SIS.cpp
+    InstallSmpaNote(c);   // a log line only, so with every setting
     r.params = ParamReadersMatch(c);
     if (r.params) r.d3d = InstallD3DHook(c);
     else SiteSet(S_D3D_IAT, ST_OFF_MISMATCH, "a launch-option reader differs: nothing is set at Direct3DCreate9");
@@ -3252,6 +3381,9 @@ static CoreSites Sites1080() {
     c.linkFree[0] = VA(A_LINK_FREE1); c.linkFree[1] = VA(A_LINK_FREE2); c.linkFree[2] = VA(A_LINK_FREE3);
     c.slotSize = VA(A_SLOT_SIZE); c.slotPool = VA(D_SLOT_POOL); c.linkSize = VA(A_LINK_SIZE); c.linkPool = VA(D_LINK_POOL);
     c.arenaSize = VA(A_ARENA_SIZE); c.arenaObj = VA(D_ARENA); c.initGuard = VA(D_INIT_GUARD);
+    c.heapCall = VA(A_HEAP_CALL); c.heapBuild = VA(A_HEAP_BUILD); c.heapObj = VA(D_HEAP0);
+    c.heapSize[0] = VA(A_HEAP_SIZE1); c.heapSize[1] = VA(A_HEAP_SIZE2); c.heapSize[2] = VA(A_HEAP_SIZE3); c.heapSize[3] = VA(A_HEAP_SIZE4);
+    c.smpaCall = VA(A_SMPA20); c.fatal = VA(A_FATAL);
     c.nativeInit = VA(A_NATIVE_INIT); c.nativeSizeSt = VA(A_NATIVE_SIZE_ST); c.nativePtrSt = VA(A_NATIVE_PTR_ST);
     c.nativeCountSt = VA(A_NATIVE_CNT_ST); c.nativePtr = VA(D_NATIVE_PTR); c.nativeSize = VA(D_NATIVE_SIZE); c.nativeCount = VA(D_NATIVE_COUNT);
     c.vstructName = VA(A_VSTRUCT_NAME); c.vstructSize = VA(A_VSTRUCT_SIZE); c.vstructPool = VA(D_VSTRUCT_POOL); c.vstructNameStr = VA(A_VSTRUCT_STR);
@@ -3289,6 +3421,9 @@ static CoreSites SitesCe() {
     c.linkFree[0] = VA(CE_A_LINK_FREE1); c.linkFree[1] = VA(CE_A_LINK_FREE2); c.linkFree[2] = VA(CE_A_LINK_FREE3);
     c.slotSize = VA(CE_A_SLOT_SIZE); c.slotPool = VA(CE_D_SLOT_POOL); c.linkSize = VA(CE_A_LINK_SIZE); c.linkPool = VA(CE_D_LINK_POOL);
     c.arenaSize = VA(CE_A_ARENA_SIZE); c.arenaObj = VA(CE_D_ARENA); c.initGuard = VA(CE_D_INIT_GUARD);
+    c.heapCall = VA(CE_A_HEAP_CALL); c.heapBuild = VA(CE_A_HEAP_BUILD); c.heapObj = VA(CE_D_HEAP0);
+    c.heapSize[0] = VA(CE_A_HEAP_SIZE1); c.heapSize[1] = VA(CE_A_HEAP_SIZE2); c.heapSize[2] = VA(CE_A_HEAP_SIZE3); c.heapSize[3] = VA(CE_A_HEAP_SIZE4);
+    c.smpaCall = VA(CE_A_SMPA20); c.fatal = VA(CE_A_FATAL);
     c.nativeInit = VA(CE_A_NATIVE_INIT); c.nativeSizeSt = VA(CE_A_NATIVE_SIZE_ST); c.nativePtrSt = VA(CE_A_NATIVE_PTR_ST);
     c.nativeCountSt = VA(CE_A_NATIVE_CNT_ST); c.nativePtr = VA(CE_D_NATIVE_PTR); c.nativeSize = VA(CE_D_NATIVE_SIZE); c.nativeCount = VA(CE_D_NATIVE_COUNT);
     c.vstructName = VA(CE_A_VSTRUCT_NAME); c.vstructSize = VA(CE_A_VSTRUCT_SIZE); c.vstructPool = VA(CE_D_VSTRUCT_POOL); c.vstructNameStr = VA(CE_A_VSTRUCT_STR);

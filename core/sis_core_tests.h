@@ -321,6 +321,13 @@ static uint8_t g_tRd[3][6];                  // their readers: cmp [slot], esi (
 static uint8_t g_tV1Slot[5], g_tV1Link[5], g_tV1Arena[5], g_tV1VsName[5], g_tV1VsSize[4];
 static uint32_t g_tV1SlotPool[16], g_tV1LinkPool[32], g_tV1ArenaObj[8], g_tV1Guard, g_tV1VsPool;
 static char g_tV1VsStr[] = "VehicleStruct";
+// The main heap's builder as the game has it: the call that reaches it, its four sizes, the object and the init guard;
+// and the SMPA20 call with a stand-in for the fatal-error function, which records what it was called with.
+static uint8_t g_tHpCall[5], g_tHpS1[5], g_tHpS2[10], g_tHpS3[5], g_tHpS4[5], g_tSmpaCall[5];
+static uint32_t g_tHpObj[64], g_tHpGuard, g_tHpAudio[64], g_tHpAudioAt[2];
+static uint32_t g_tFatalAsked, g_tFatalFree, g_tFatalN; static const char* g_tFatalCode;
+static void __cdecl TestFatal(const char* code, uint32_t asked, uint32_t avail) { g_tFatalCode = code; g_tFatalAsked = asked; g_tFatalFree = avail; g_tFatalN++; }
+static const char g_tSmpaCode[] = "SMPA20";
 // The stock budget table of the 1.0.8.0 file (16 rows x 3 qualities, bytes).
 static const uint64_t kCtStockTable[48] = {
     0xD200000, 0xF000000, 0x25800000, 0xD200000, 0xF000000, 0x25800000, 0xD200000, 0xF000000, 0x25800000,
@@ -803,6 +810,120 @@ static void CoreTests() {
         g_tV1VsPool = 0; g_tV1VsName[1] ^= 1;
         CHECK(!RaiseVehicleStruct(c, 100) && g_tV1VsSize[1] == 0x32 && g_site[S_VSTRUCT].state == ST_OFF_MISMATCH, "VehicleStruct: refused after another pool's name");
         g_tV1VsName[1] ^= 1;
+        // The main heap: 100 MiB raised to 128 before the game builds it, all four sizes or none (H1, FINDINGS 8bc).
+        {
+            CoreSites h = {};
+            auto reset = [&](CoreSites& k, bool ce) {
+                if (ce) SitesShapeCe(k); else SitesShape1080(k);
+                memset(g_tHpObj, 0, sizeof(g_tHpObj)); g_tHpGuard = 0;
+                uint32_t sz = 100u << 20, field = (uint32_t)(uintptr_t)(g_tHpObj + 20);   // +0x50
+                g_tHpS1[0] = 0x68; memcpy(g_tHpS1 + 1, &sz, 4);
+                g_tHpS2[0] = 0xC7; g_tHpS2[1] = 0x05; memcpy(g_tHpS2 + 2, &field, 4); memcpy(g_tHpS2 + 6, &sz, 4);
+                g_tHpS3[0] = 0x68; memcpy(g_tHpS3 + 1, &sz, 4);
+                g_tHpS4[0] = ce ? 0x68 : 0xB9; memcpy(g_tHpS4 + 1, &sz, 4);
+                k.heapBuild = (uintptr_t)0x00454740u;                     // any address: the call must reach it
+                int32_t rel = (int32_t)(k.heapBuild - ((uintptr_t)g_tHpCall + 5)); g_tHpCall[0] = 0xE8; memcpy(g_tHpCall + 1, &rel, 4);
+                k.heapCall = (uintptr_t)g_tHpCall; k.heapObj = (uintptr_t)g_tHpObj; k.initGuard = (uintptr_t)&g_tHpGuard;
+                k.heapSize[0] = (uintptr_t)g_tHpS1; k.heapSize[1] = (uintptr_t)g_tHpS2; k.heapSize[2] = (uintptr_t)g_tHpS3; k.heapSize[3] = (uintptr_t)g_tHpS4;
+            };
+            auto at = [](const uint8_t* b, int o) { uint32_t v; memcpy(&v, b + o, 4); return v; };
+            auto all = [&](uint32_t v) { return at(g_tHpS1, 1) == v && at(g_tHpS2, 6) == v && at(g_tHpS3, 1) == v && at(g_tHpS4, 1) == v; };
+            const uint32_t M100 = 100u << 20, M128 = 128u << 20;
+            reset(h, false);
+            CHECK(RaiseGameHeap(h, 128) && all(M128) && g_tHpS4[0] == 0xB9 && g_tHpS2[0] == 0xC7 && g_raised[S_GAME_HEAP] == M128 && !strcmp(g_site[S_GAME_HEAP].note, "100 -> 128 MiB"),
+                  "main heap: 100 -> 128 MiB at all four sizes: %s", g_site[S_GAME_HEAP].note);
+            reset(h, false); g_tHpGuard = 1;
+            CHECK(!RaiseGameHeap(h, 128) && all(M100) && g_site[S_GAME_HEAP].state == ST_OFF_ERROR, "main heap: left alone once the game set its guard");
+            reset(h, false); g_tHpObj[0] = 0xEC07A4;
+            CHECK(!RaiseGameHeap(h, 128) && all(M100) && g_site[S_GAME_HEAP].state == ST_OFF_ERROR, "main heap: left alone once it is built");
+            reset(h, false); h.heapBuild += 0x10;
+            CHECK(!RaiseGameHeap(h, 128) && all(M100) && g_site[S_GAME_HEAP].state == ST_OFF_MISMATCH && strstr(g_site[S_GAME_HEAP].note, "another mod builds it"),
+                  "main heap: another mod's builder (ZolikaPatch's NewMemorySystem): nothing written: %s", g_site[S_GAME_HEAP].note);
+            reset(h, false); g_tHpS3[1] ^= 1;
+            CHECK(!RaiseGameHeap(h, 128) && at(g_tHpS1, 1) == M100 && at(g_tHpS2, 6) == M100 && at(g_tHpS4, 1) == M100 && g_site[S_GAME_HEAP].state == ST_OFF_MISMATCH,
+                  "main heap: one size that disagrees: none of the four written: %s", g_site[S_GAME_HEAP].note);
+            reset(h, false); g_tHpS2[2] ^= 4;
+            CHECK(!RaiseGameHeap(h, 128) && all(M100) && g_site[S_GAME_HEAP].state == ST_OFF_MISMATCH, "main heap: a size field store at another address: refused");
+            reset(h, true);
+            CHECK(RaiseGameHeap(h, 128) && all(M128) && g_tHpS4[0] == 0x68, "main heap: the Complete Edition's shape, a push for the init's size");
+            reset(h, true); g_tHpS4[0] = 0xB9;
+            CHECK(!RaiseGameHeap(h, 128) && all(M100), "main heap: 1.0.8.0's mov ecx where the Complete Edition pushes: refused");
+            reset(h, false);
+            { uint32_t big = 160u << 20; memcpy(g_tHpS1 + 1, &big, 4); memcpy(g_tHpS2 + 6, &big, 4); memcpy(g_tHpS3 + 1, &big, 4); memcpy(g_tHpS4 + 1, &big, 4); }
+            CHECK(RaiseGameHeap(h, 128) && all(160u << 20) && g_raised[S_GAME_HEAP] == (160u << 20), "main heap: a larger size another mod wrote stands: %s", g_site[S_GAME_HEAP].note);
+            // Read back at sizing: the heap the game built must be at least what SISCO left.
+            reset(h, false); RaiseGameHeap(h, 128);
+            const int others[4] = { S_SLOT_SIZE, S_LINK_SIZE, S_ARENA_SIZE, S_VSTRUCT };
+            for (int i = 0; i < 4; i++) SiteSet(others[i], ST_OFF_DISABLED, "");
+            g_tHpObj[0] = 0xEC07A4; g_tHpObj[20] = M128;
+            ReadBackRaises(h);
+            CHECK(g_site[S_GAME_HEAP].state == ST_ON && strstr(g_builtNote, "main heap 128 MB"), "main heap: read back at 128 MB at sizing: %s", g_builtNote);
+            g_tHpObj[20] = M100;
+            ReadBackRaises(h);
+            CHECK(g_site[S_GAME_HEAP].state == ST_OFF_MISMATCH && strstr(g_site[S_GAME_HEAP].note, "built with 100 MiB"), "main heap: built at 100 after all: marked: %s", g_site[S_GAME_HEAP].note);
+            // SMPA20: the call goes through SISCO, which names the heap and passes the game's own call on unchanged.
+            int32_t frel = (int32_t)((uintptr_t)TestFatal - ((uintptr_t)g_tSmpaCall + 5)); g_tSmpaCall[0] = 0xE8; memcpy(g_tSmpaCall + 1, &frel, 4);
+            g_tHpAudioAt[1] = (uint32_t)(uintptr_t)g_tHpAudio;   // the audio object sits just before its buffer pointer
+            h.smpaCall = (uintptr_t)g_tSmpaCall; h.fatal = (uintptr_t)TestFatal;
+            h.audioHeapPtr = (uintptr_t)&g_tHpAudioAt[1] + 4;
+            CHECK(InstallSmpaNote(h) && g_site[S_SMPA20].state == ST_ON, "smpa20: the call is taken");
+            int32_t nrel; memcpy(&nrel, g_tSmpaCall + 1, 4);
+            CHECK((uintptr_t)g_tSmpaCall + 5 + nrel == (uintptr_t)ThunkSmpa1080, "smpa20: 1.0.8.0's call reaches the 1.0.8.0 thunk");
+            g_tHpObj[20] = M128; g_tHpObj[38] = 12u << 10;   // +0x98: 12 KB free
+            g_tHpAudio[20] = 152u << 20; g_tHpAudio[38] = 3u << 10;
+            // As the game calls it: the heap in edi (esi on the CE), what is free, the size asked and the code pushed.
+            uint32_t hp = (uint32_t)(uintptr_t)g_tHpObj, au = (uint32_t)(uintptr_t)g_tHpAudio, code = (uint32_t)(uintptr_t)g_tSmpaCode, keepEdi = 0x5EED, keepEsi = 0xE51, outEdi = 0, outEsi = 0;
+            void* t1 = (void*)ThunkSmpa1080; void* t2 = (void*)ThunkSmpaCe;
+            g_tFatalN = 0;
+            __asm {
+                push edi
+                push esi
+                mov edi, hp
+                mov esi, keepEsi
+                push 0x3000
+                push 48
+                push code
+                call t1
+                add esp, 12
+                mov outEdi, edi
+                mov outEsi, esi
+                pop esi
+                pop edi
+            }
+            CHECK(g_tFatalN == 1 && g_tFatalCode == g_tSmpaCode && g_tFatalAsked == 48 && g_tFatalFree == 0x3000 && outEdi == hp && outEsi == keepEsi,
+                  "smpa20: 1.0.8.0: the game's own call goes on with its arguments and registers (%u, %u, %u)", g_tFatalN, g_tFatalAsked, g_tFatalFree);
+            __asm {
+                push edi
+                push esi
+                mov esi, au
+                mov edi, keepEdi
+                push 0x0C00
+                push 16
+                push code
+                call t2
+                add esp, 12
+                mov outEdi, edi
+                mov outEsi, esi
+                pop esi
+                pop edi
+            }
+            CHECK(g_tFatalN == 2 && g_tFatalAsked == 16 && g_tFatalFree == 0x0C00 && outEsi == au && outEdi == keepEdi,
+                  "smpa20: the Complete Edition: the heap read from esi, the call goes on unchanged (%u, %u)", g_tFatalN, g_tFatalAsked);
+            char st[200]; SmpaText(st, sizeof(st), hp, 48);
+            CHECK(!strcmp(st, "SMPA20: the game's main heap (128 MB) ran out: 12 KB free, 48 bytes asked"), "smpa20: the main heap named: %s", st);
+            SmpaText(st, sizeof(st), au, 16);
+            CHECK(!strcmp(st, "SMPA20: the audio heap (152 MB) ran out: 3 KB free, 16 bytes asked; the main heap had 12 KB free of 128 MB"), "smpa20: the audio heap named: %s", st);
+            g_tHpAudioAt[1] = 0;
+            SmpaText(st, sizeof(st), au, 16);
+            CHECK(strstr(st, "one of the game's smaller heaps (152 MB)") != NULL, "smpa20: a heap that is neither: %s", st);
+            g_tSmpaCall[1] ^= 1;
+            CHECK(!InstallSmpaNote(h) && g_site[S_SMPA20].state == ST_OFF_MISMATCH, "smpa20: a call that reaches somewhere else is left alone");
+            h.build = BUILD_CE; g_tSmpaCall[1] ^= 1;
+            memcpy(g_tSmpaCall + 1, &frel, 4);
+            CHECK(InstallSmpaNote(h), "smpa20: the Complete Edition's call is taken");
+            memcpy(&nrel, g_tSmpaCall + 1, 4);
+            CHECK((uintptr_t)g_tSmpaCall + 5 + nrel == (uintptr_t)ThunkSmpaCe, "smpa20: the Complete Edition's call reaches its own thunk");
+        }
         // SISCO.ini. What matters is not the values but the defaults: a player with no file, a missing key or a
         // typo must get exactly the behaviour of a player with no file at all, because that is everyone.
         {
@@ -1596,6 +1717,15 @@ static void CoreTests() {
         TrafficRaise(4000, 800);
         CHECK(g_tVeh == 13333333u, "up: the game's low-memory values are never touched");
         g_car = keepCar; g_ped = keepPed; g_tVeh = keepVeh;
+    }
+    // ---- the size line names the main heap as the game built it and what is free in it, and only when it can be read
+    {
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK);
+        memset(g_tHpObj, 0, sizeof(g_tHpObj)); g_tHpObj[20] = 128u << 20; g_tHpObj[38] = 41u << 20;
+        g_cs.heapObj = (uintptr_t)g_tHpObj; TSizeSettle(1000, 3000); g_cs.heapObj = 0;
+        CHECK(g_sized && strstr(g_sizeNote, "; main heap 128 MB, 41 MB free") != NULL, "size: the main heap on the size line: %s", g_sizeNote);
+        TSizeReset(1, 23370, CAR_STOCK, PED_STOCK); TSizeSettle(1000, 3000);
+        CHECK(g_sized && !strstr(g_sizeNote, "main heap"), "size: no main heap note where it cannot be read");
     }
     // ---- the way back up through the worker: the ceiling proven at the hold, emergencies under 2000 MB, the world
     // settling again, nothing on the loading screen, then one raise written whole with the car and ped budgets following

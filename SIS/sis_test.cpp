@@ -130,6 +130,9 @@ int main() {
         CHECK(strstr(buf, "  brake     stopped at 63 s: two steps freed nothing (largest free 150 MB); budget stays 2614 MB") && st == 1,
               "stall: the stop is on the log once, with the block and the budget it holds (%d lines)", st);
     }
+    CHECK(strstr(buf, "  crash     SMPA20: the game's main heap (128 MB) ran out: 12 KB free, 48 bytes asked\r\n")
+          && strstr(buf, "  crash     SMPA20: the audio heap (152 MB) ran out: 3 KB free, 16 bytes asked; the main heap had 12 KB free of 128 MB\r\n"),
+          "smpa20: both thunks wrote the line before the game's own error");
     CHECK(!strstr(buf, "  built     "), "sizing: the read-back line is gone; a raise another plugin undid has its own site line");
     CHECK(strstr(buf, "LEFT AT THE GAME'S OWN: the link pool was not raised") && !strstr(buf, ", the game's own (card 23370 MB, render targets 799 MB, the card allows 20050), LEFT"),
           "size: a budget left at the game's own says so once");

@@ -45,7 +45,7 @@ of these lines under it:
 |---|---|
 | `Enabled=0` | everything, the same as taking `SISCO.asi` out |
 | `Fixes=0` | the three bug fixes |
-| `Limits=0` | the bigger pools, the streaming arena and the engine-sound slots |
+| `Limits=0` | the bigger pools, the streaming arena, the main heap and the engine-sound slots |
 | `Budget=0` | the streaming budget, the traffic budgets, the brake, and the presents skipped while loading |
 
 Only the number `0` turns something off. A typo, or a word like `off`, leaves that part on, so you cannot break it
@@ -86,6 +86,7 @@ Every one of these is a number the game already has.
 | car models | 40 MB | 200 MB | measured: 7 different cars in traffic becomes 22 |
 | ped models | 50 MB | 180 MB | more different people: in testing the game's own budget gave 4 ped models on the street, 200 MB gave 7 |
 | streaming arena | 160 MiB | 400 MiB | the workspace the streamer loads into |
+| main heap | 100 MiB | 128 MiB | the pools and much of what the game and other mods allocate; when it runs out the game ends with SMPA20 |
 | drawable slots | 10,000 | 32,768 | when this pool fills, the game deadlocks |
 | list entries | 13,000 | 65,536 | when this pool runs dry, the game crashes |
 | VehicleStruct slots | 50 | 100 | more distinct cars need more of them |

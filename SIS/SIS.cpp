@@ -132,12 +132,14 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     else SisLog("fixes", "release queue %s; link-pool lock %s; startup race %s", r.queue ? "on" : "OFF", r.lock ? "on" : "OFF", r.race ? "on" : "OFF");
     if (!g_set.limits) SisLog("limits", "off (Limits=0)");
     else {
-        SisLog("limits", "VehicleStruct %s; drawable slots %s; links %s; arena in KB %s",
+        char e[128];
+        SisLog("limits", "VehicleStruct %s; drawable slots %s; links %s; arena in KB %s; main heap %s",
                SiteText(S_VSTRUCT, a, sizeof(a)), SiteText(S_SLOT_SIZE, b, sizeof(b)), SiteText(S_LINK_SIZE, c, sizeof(c)),
-               SiteText(S_ARENA_SIZE, d, sizeof(d)));
+               SiteText(S_ARENA_SIZE, d, sizeof(d)), SiteText(S_GAME_HEAP, e, sizeof(e)));
         SisLog("audio", "engine sound slots %s%s%s%s", SiteText(S_ENGINE, a, sizeof(a)),
                g_engineOn ? " (from " : "", g_engineOn ? g_enginePlan.from : "", g_engineOn ? ")" : "");
     }
+    if (g_site[S_SMPA20].state != ST_ON) SisLog("site", "%s %s: an SMPA20 error will not be named in this log", kSiteName[S_SMPA20], SiteText(S_SMPA20, a, sizeof(a)));
     if (g_site[S_D3D_IAT].state != ST_ON) SisLog("direct3d", "hook %s", SiteText(S_D3D_IAT, a, sizeof(a)));   // on: the direct3d line below says so
     // Every site of the three fixes, named only when one of them is off: the lines above say which fix, this says
     // which site and why. The sites after this one carry their own reason in the lines above.

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.7 (2026-10-28)
+
+- The game's main heap is 128 MB instead of 100. It is a fixed-size heap the game builds at startup, and the pools,
+  much of what the game allocates in play and much of what other mods allocate come out of it. With a heavy texture
+  pack it had under 6 MB free at its lowest in a 30-minute drive, and a player's game ended after 20 minutes with
+  SMPA20, the game's error for a heap with no room left. The extra 28 MB come out of the game's 4 GB address space;
+  on a tight install the brake holds the streaming budget about that much lower. SISCO leaves the heap alone when
+  another mod already builds it (ZolikaPatch's NewMemorySystem) or made it larger. Part of `Limits`.
+- If the game ever ends with SMPA20, the log now says which heap ran out and what was free in it, just before the
+  game's own error box. The size line also names the main heap and what is free in it.
+
 ## 1.0.6 (2026-10-27)
 
 - The brake stops lowering the budget when lowering it frees nothing. After a sudden drop in free memory, two players'
